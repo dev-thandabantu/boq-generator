@@ -1,48 +1,37 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import type { BOQDocument } from "./types";
 
-const client = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-const BOQ_SCHEMA = {
-  type: "object",
+const BOQ_RESPONSE_SCHEMA = {
+  type: SchemaType.OBJECT,
   properties: {
-    project: { type: "string", description: "Full project name" },
-    location: { type: "string", description: "Project location/site" },
-    prepared_by: { type: "string", description: "Company or person preparing the BOQ" },
-    date: { type: "string", description: "Date in DD/MM/YYYY format" },
+    project: { type: SchemaType.STRING, description: "Full project name" },
+    location: { type: SchemaType.STRING, description: "Project location/site" },
+    prepared_by: { type: SchemaType.STRING, description: "Company or person preparing the BOQ" },
+    date: { type: SchemaType.STRING, description: "Date in DD/MM/YYYY format" },
     bills: {
-      type: "array",
+      type: SchemaType.ARRAY,
       items: {
-        type: "object",
+        type: SchemaType.OBJECT,
         properties: {
-          number: { type: "number" },
-          title: { type: "string", description: "Bill title e.g. PRELIMINARY AND GENERAL ITEMS" },
+          number: { type: SchemaType.NUMBER },
+          title: { type: SchemaType.STRING, description: "Bill title e.g. PRELIMINARY AND GENERAL ITEMS" },
           items: {
-            type: "array",
+            type: SchemaType.ARRAY,
             items: {
-              type: "object",
+              type: SchemaType.OBJECT,
               properties: {
-                item_no: { type: "string", description: "Item number: A, B, C or 1.1, 1.2 or blank for headers" },
-                description: { type: "string", description: "Full technical work description" },
-                unit: {
-                  type: "string",
-                  description: "Measurement unit: m, m², m³, No., Item, LS, kg, etc.",
-                },
-                qty: { type: ["number", "null"], description: "Quantity — null if not specified" },
-                rate: { type: ["number", "null"], description: "Always null — engineer will price" },
-                amount: { type: ["number", "null"], description: "Always null for new BOQs" },
-                is_header: {
-                  type: "boolean",
-                  description: "True if this row is a section header with no quantities",
-                },
-                note: {
-                  type: ["string", "null"],
-                  description: "Special notes like Incl or Rate only",
-                },
+                item_no: { type: SchemaType.STRING, description: "Item number: A, B, C or 1.1, 1.2 or blank for headers" },
+                description: { type: SchemaType.STRING, description: "Full technical work description" },
+                unit: { type: SchemaType.STRING, description: "Measurement unit: m, m², m³, No., Item, LS, kg, etc." },
+                qty: { type: SchemaType.NUMBER, nullable: true, description: "Quantity — null if not specified" },
+                rate: { type: SchemaType.NUMBER, nullable: true, description: "Always null — engineer will price" },
+                amount: { type: SchemaType.NUMBER, nullable: true, description: "Always null for new BOQs" },
+                is_header: { type: SchemaType.BOOLEAN, description: "True if this row is a section header with no quantities" },
+                note: { type: SchemaType.STRING, nullable: true, description: "Special notes like Incl or Rate only" },
               },
-              required: ["item_no", "description", "unit", "qty", "rate", "amount"],
+              required: ["item_no", "description", "unit"],
             },
           },
         },
@@ -73,30 +62,27 @@ RULES:
 13. The date should be today's date if not specified in the document`;
 
 export async function generateBOQ(sowText: string): Promise<BOQDocument> {
-  const message = await client.messages.create({
-    model: "claude-opus-4-6",
-    max_tokens: 8000,
-    system: SYSTEM_PROMPT,
-    tools: [
-      {
-        name: "create_boq",
-        description: "Create a structured Bill of Quantities from the Scope of Work",
-        input_schema: BOQ_SCHEMA as Anthropic.Tool["input_schema"],
-      },
-    ],
-    tool_choice: { type: "any" },
-    messages: [
-      {
-        role: "user",
-        content: `Please extract a complete Bill of Quantities from this Scope of Work document:\n\n${sowText}`,
-      },
-    ],
+  const model = genAI.getGenerativeModel({
+    model: "gemini-2.0-flash",
+    systemInstruction: SYSTEM_PROMPT,
+    generationConfig: {
+      responseMimeType: "application/json",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      responseSchema: BOQ_RESPONSE_SCHEMA as any,
+      temperature: 0.2,
+    },
   });
 
-  const toolUse = message.content.find((c) => c.type === "tool_use");
-  if (!toolUse || toolUse.type !== "tool_use") {
-    throw new Error("Claude did not return a structured BOQ");
+  const result = await model.generateContent(
+    `Please extract a complete Bill of Quantities from this Scope of Work document:\n\n${sowText}`
+  );
+
+  const text = result.response.text();
+  const boq = JSON.parse(text) as BOQDocument;
+
+  if (!boq.bills || !Array.isArray(boq.bills)) {
+    throw new Error("Gemini did not return a valid BOQ structure");
   }
 
-  return toolUse.input as BOQDocument;
+  return boq;
 }
