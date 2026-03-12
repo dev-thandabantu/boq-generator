@@ -63,7 +63,13 @@ export default function UploadPage() {
       router.push("/boq");
     } catch (err) {
       setStage("error");
-      setError(err instanceof Error ? err.message : "Something went wrong");
+      const msg = err instanceof Error ? err.message : "Something went wrong";
+      const friendly = msg.includes("429") || msg.includes("quota") || msg.includes("Too Many Requests")
+        ? "AI quota exceeded. Please try again in a minute."
+        : msg.includes("fetch") || msg.includes("network")
+        ? "Network error. Check your connection and try again."
+        : "Failed to generate BOQ. Please try again.";
+      setError(friendly);
     }
   }
 
@@ -79,7 +85,7 @@ export default function UploadPage() {
       <div className="relative z-10 w-full max-w-xl animate-fade-up">
         <div className="text-center mb-10">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-400 text-xs font-medium mb-6">
-            Powered by Gemini AI
+            AI-Powered · For Zambian Construction
           </div>
           <h1 className="text-4xl font-bold tracking-tight mb-3">
             BOQ <span className="text-amber-400">Generator</span>
