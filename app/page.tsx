@@ -79,7 +79,7 @@ export default function UploadPage() {
       <div className="relative z-10 w-full max-w-xl animate-fade-up">
         <div className="text-center mb-10">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-400 text-xs font-medium mb-6">
-            Powered by Claude AI
+            Powered by Gemini AI
           </div>
           <h1 className="text-4xl font-bold tracking-tight mb-3">
             BOQ <span className="text-amber-400">Generator</span>
