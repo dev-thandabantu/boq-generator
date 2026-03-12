@@ -29,9 +29,10 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error("BOQ generation error:", err);
     const message = err instanceof Error ? err.message : "Unknown error";
+    const isQuota = message.includes("429") || message.includes("quota") || message.includes("Too Many Requests");
     return NextResponse.json(
-      { error: `Failed to generate BOQ: ${message}` },
-      { status: 500 }
+      { error: message },
+      { status: isQuota ? 429 : 500 }
     );
   }
 }

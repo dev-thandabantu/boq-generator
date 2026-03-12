@@ -54,6 +54,7 @@ export default function UploadPage() {
       });
       if (!genRes.ok) {
         const { error: e } = await genRes.json();
+        if (genRes.status === 429) throw new Error("__quota__");
         throw new Error(e || "BOQ generation failed");
       }
       const { boq } = await genRes.json();
@@ -64,9 +65,9 @@ export default function UploadPage() {
     } catch (err) {
       setStage("error");
       const msg = err instanceof Error ? err.message : "Something went wrong";
-      const friendly = msg.includes("429") || msg.includes("quota") || msg.includes("Too Many Requests")
+      const friendly = msg === "__quota__"
         ? "AI quota exceeded. Please try again in a minute."
-        : msg.includes("fetch") || msg.includes("network")
+        : msg === "Failed to fetch"
         ? "Network error. Check your connection and try again."
         : "Failed to generate BOQ. Please try again.";
       setError(friendly);
