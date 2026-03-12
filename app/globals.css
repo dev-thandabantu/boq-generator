@@ -127,3 +127,30 @@
     @apply font-sans;
   }
 }
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-up {
+  animation: fadeUp 0.4s ease forwards;
+}
+
+.boq-cell-editable {
+  background: transparent;
+  border: none;
+  outline: none;
+  width: 100%;
+  color: inherit;
+  font-size: inherit;
+  font-family: inherit;
+  padding: 0;
+  resize: none;
+}
+
+.boq-cell-editable:focus {
+  background: rgba(245, 158, 11, 0.08);
+  outline: 1px solid rgba(245, 158, 11, 0.4);
+  border-radius: 2px;
+}
