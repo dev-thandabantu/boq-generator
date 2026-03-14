@@ -1,16 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import { stripe } from "@/lib/stripe";
+import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
   try {
-    const { filename } = await req.json() as { filename: string };
-
+    const { filename } = (await req.json()) as { filename: string };
     const origin = req.headers.get("origin") || "http://localhost:3001";
+
+    // Get authenticated user
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
+      customer_email: user.email ?? undefined,
+      metadata: { user_id: user.id },
       line_items: [
         {
           price_data: {
