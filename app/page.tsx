@@ -1,23 +1,14 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import { Progress } from "@/components/ui/progress";
 
-type Stage = "idle" | "extracting" | "generating" | "done" | "error";
-
-const STAGES: Record<Stage, { label: string; pct: number }> = {
-  idle: { label: "", pct: 0 },
-  extracting: { label: "Extracting text from PDF…", pct: 25 },
-  generating: { label: "Generating BOQ with AI…", pct: 65 },
-  done: { label: "Done!", pct: 100 },
-  error: { label: "", pct: 0 },
-};
+type Stage = "idle" | "extracting" | "ready" | "paying" | "error";
 
 export default function UploadPage() {
-  const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
+  const [pages, setPages] = useState<number | null>(null);
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -28,53 +19,60 @@ export default function UploadPage() {
       return;
     }
     setFile(f);
+    setStage("idle");
     setError(null);
+    setPages(null);
   }
 
-  async function handleGenerate() {
+  async function handleExtract() {
     if (!file) return;
     setError(null);
+    setStage("extracting");
 
     try {
-      setStage("extracting");
       const form = new FormData();
       form.append("file", file);
-      const extractRes = await fetch("/api/extract", { method: "POST", body: form });
-      if (!extractRes.ok) {
-        const { error: e } = await extractRes.json();
+      const res = await fetch("/api/extract", { method: "POST", body: form });
+      if (!res.ok) {
+        const { error: e } = await res.json();
         throw new Error(e || "PDF extraction failed");
       }
-      const { text } = await extractRes.json();
-
-      setStage("generating");
-      const genRes = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-      if (!genRes.ok) {
-        const { error: e } = await genRes.json();
-        if (genRes.status === 429) throw new Error("__quota__");
-        throw new Error(e || "BOQ generation failed");
-      }
-      const { boq } = await genRes.json();
-
-      setStage("done");
-      sessionStorage.setItem("boq_data", JSON.stringify(boq));
-      router.push("/boq");
+      const { text, pages: p } = await res.json();
+      sessionStorage.setItem("boq_text", text);
+      setPages(p);
+      setStage("ready");
     } catch (err) {
       setStage("error");
       const msg = err instanceof Error ? err.message : "Something went wrong";
-      const friendly = msg === "__quota__"
-        ? "AI quota exceeded. Please try again in a minute."
-        : msg === "Failed to fetch"
-        ? "Network error. Check your connection and try again."
-        : "Failed to generate BOQ. Please try again.";
-      setError(friendly);
+      setError(msg === "Failed to fetch" ? "Network error. Check your connection and try again." : msg);
     }
   }
 
-  const isProcessing = stage === "extracting" || stage === "generating";
+  async function handleCheckout() {
+    if (!file) return;
+    setStage("paying");
+    setError(null);
+
+    try {
+      const res = await fetch("/api/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: file.name }),
+      });
+      if (!res.ok) {
+        const { error: e } = await res.json();
+        throw new Error(e || "Could not create payment session");
+      }
+      const { url } = await res.json();
+      window.location.href = url;
+    } catch (err) {
+      setStage("error");
+      const msg = err instanceof Error ? err.message : "Something went wrong";
+      setError(msg === "Failed to fetch" ? "Network error. Check your connection and try again." : msg);
+    }
+  }
+
+  const isProcessing = stage === "extracting" || stage === "paying";
 
   return (
     <main className="min-h-screen flex flex-col items-center justify-center px-4 py-16">
@@ -84,104 +82,176 @@ export default function UploadPage() {
       </div>
 
       <div className="relative z-10 w-full max-w-xl animate-fade-up">
-        <div className="text-center mb-10">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-400 text-xs font-medium mb-6">
-            AI-Powered · For Zambian Construction
+        {stage === "ready" ? (
+          /* ── Pricing screen ── */
+          <div className="text-center space-y-6">
+            <div>
+              <h1 className="text-4xl font-bold tracking-tight mb-3">
+                BOQ <span className="text-amber-400">Generator</span>
+              </h1>
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-green-500/30 bg-green-500/10 text-green-400 text-xs font-medium">
+                <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+                </svg>
+                PDF ready · {pages} {pages === 1 ? "page" : "pages"} extracted
+              </div>
+            </div>
+
+            {/* File pill */}
+            <div className="flex items-center gap-3 px-4 py-3 rounded-lg bg-white/[0.03] border border-white/10 text-left">
+              <div className="w-8 h-8 rounded bg-amber-500/20 flex items-center justify-center shrink-0">
+                <FileIcon className="w-4 h-4 text-amber-400" />
+              </div>
+              <p className="text-sm text-white truncate flex-1">{file?.name}</p>
+              <button
+                className="text-xs text-gray-500 hover:text-gray-300 shrink-0"
+                onClick={() => { setFile(null); setStage("idle"); setPages(null); }}
+              >
+                Change
+              </button>
+            </div>
+
+            {/* Pricing card */}
+            <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-6 text-left space-y-4">
+              <div className="flex items-start justify-between">
+                <div>
+                  <p className="text-white font-semibold text-lg">BOQ Generation</p>
+                  <p className="text-gray-400 text-sm mt-0.5">One-time · instant delivery</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-2xl font-bold text-amber-400">$100</p>
+                  <p className="text-xs text-gray-500">USD</p>
+                </div>
+              </div>
+              <ul className="space-y-2">
+                {[
+                  "Structured BOQ with bill sections",
+                  "Editable table — adjust quantities & descriptions",
+                  "Download .xlsx in Zambian tender format (ZMW)",
+                ].map((item) => (
+                  <li key={item} className="flex items-start gap-2 text-sm text-gray-300">
+                    <svg className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+                    </svg>
+                    {item}
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <button
+              className="w-full py-3.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-black font-semibold text-sm transition-colors"
+              onClick={handleCheckout}
+            >
+              Pay $100 &amp; Generate BOQ →
+            </button>
+
+            <p className="text-xs text-gray-600">
+              Secure payment via Stripe. You will be redirected back after payment.
+            </p>
           </div>
-          <h1 className="text-4xl font-bold tracking-tight mb-3">
-            BOQ <span className="text-amber-400">Generator</span>
-          </h1>
-          <p className="text-gray-400 text-base leading-relaxed">
-            Upload a Scope of Work PDF. Get a tender-ready
-            <br />
-            Bill of Quantities in under 60 seconds.
-          </p>
-        </div>
+        ) : (
+          /* ── Upload screen ── */
+          <>
+            <div className="text-center mb-10">
+              <h1 className="text-4xl font-bold tracking-tight mb-3">
+                BOQ <span className="text-amber-400">Generator</span>
+              </h1>
+              <p className="text-gray-400 text-base leading-relaxed">
+                Upload a Scope of Work PDF. Get a tender-ready
+                <br />
+                Bill of Quantities in under 60 seconds.
+              </p>
+            </div>
 
-        {/* Upload zone */}
-        <div
-          className={`relative rounded-xl border-2 border-dashed transition-colors cursor-pointer p-10 text-center
-            ${dragging ? "border-amber-400 bg-amber-500/5" : "border-white/10 bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]"}
-          `}
-          onClick={() => !isProcessing && inputRef.current?.click()}
-          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragging(false);
-            const f = e.dataTransfer.files[0];
-            if (f) handleFile(f);
-          }}
-        >
-          <input
-            ref={inputRef}
-            type="file"
-            accept=".pdf"
-            className="hidden"
-            onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }}
-          />
+            {/* Upload zone */}
+            <div
+              className={`relative rounded-xl border-2 border-dashed transition-colors cursor-pointer p-10 text-center
+                ${dragging ? "border-amber-400 bg-amber-500/5" : "border-white/10 bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]"}
+              `}
+              onClick={() => !isProcessing && inputRef.current?.click()}
+              onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragging(false);
+                const f = e.dataTransfer.files[0];
+                if (f) handleFile(f);
+              }}
+            >
+              <input
+                ref={inputRef}
+                type="file"
+                accept=".pdf"
+                className="hidden"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }}
+              />
 
-          {file ? (
-            <div className="flex flex-col items-center gap-3">
-              <div className="w-12 h-12 rounded-lg bg-amber-500/20 flex items-center justify-center">
-                <FileIcon className="w-6 h-6 text-amber-400" />
-              </div>
-              <div>
-                <p className="font-medium text-sm text-white truncate max-w-xs">{file.name}</p>
-                <p className="text-xs text-gray-500 mt-1">{(file.size / 1024).toFixed(0)} KB</p>
-              </div>
-              {!isProcessing && (
-                <button
-                  className="text-xs text-gray-500 hover:text-gray-300 underline mt-1"
-                  onClick={(e) => { e.stopPropagation(); setFile(null); setStage("idle"); setError(null); }}
-                >
-                  Remove
-                </button>
+              {file ? (
+                <div className="flex flex-col items-center gap-3">
+                  <div className="w-12 h-12 rounded-lg bg-amber-500/20 flex items-center justify-center">
+                    <FileIcon className="w-6 h-6 text-amber-400" />
+                  </div>
+                  <div>
+                    <p className="font-medium text-sm text-white truncate max-w-xs">{file.name}</p>
+                    <p className="text-xs text-gray-500 mt-1">{(file.size / 1024).toFixed(0)} KB</p>
+                  </div>
+                  {!isProcessing && (
+                    <button
+                      className="text-xs text-gray-500 hover:text-gray-300 underline mt-1"
+                      onClick={(e) => { e.stopPropagation(); setFile(null); setStage("idle"); setError(null); }}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center gap-3">
+                  <div className="w-12 h-12 rounded-lg bg-white/5 flex items-center justify-center">
+                    <UploadIcon className="w-6 h-6 text-gray-400" />
+                  </div>
+                  <div>
+                    <p className="font-medium text-sm text-white">Drop your SOW PDF here</p>
+                    <p className="text-xs text-gray-500 mt-1">or click to browse · max 15 MB</p>
+                  </div>
+                </div>
               )}
             </div>
-          ) : (
-            <div className="flex flex-col items-center gap-3">
-              <div className="w-12 h-12 rounded-lg bg-white/5 flex items-center justify-center">
-                <UploadIcon className="w-6 h-6 text-gray-400" />
+
+            {isProcessing && (
+              <div className="mt-6 space-y-2">
+                <Progress value={stage === "extracting" ? 60 : 90} className="h-1.5 bg-white/10" />
+                <p className="text-sm text-gray-400 text-center">
+                  {stage === "extracting" ? "Extracting text from PDF…" : "Redirecting to payment…"}
+                </p>
               </div>
-              <div>
-                <p className="font-medium text-sm text-white">Drop your SOW PDF here</p>
-                <p className="text-xs text-gray-500 mt-1">or click to browse · max 15 MB</p>
+            )}
+
+            {error && (
+              <div className="mt-4 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
+                {error}
               </div>
-            </div>
-          )}
-        </div>
+            )}
 
-        {isProcessing && (
-          <div className="mt-6 space-y-2">
-            <Progress value={STAGES[stage].pct} className="h-1.5 bg-white/10" />
-            <p className="text-sm text-gray-400 text-center">{STAGES[stage].label}</p>
-          </div>
+            <button
+              className={`mt-6 w-full py-3 rounded-lg font-semibold text-sm transition-all
+                ${file && !isProcessing
+                  ? "bg-amber-400 hover:bg-amber-300 text-black cursor-pointer"
+                  : "bg-white/5 text-gray-600 cursor-not-allowed"
+                }`}
+              disabled={!file || isProcessing}
+              onClick={handleExtract}
+            >
+              {isProcessing ? (stage === "extracting" ? "Extracting…" : "Redirecting…") : "Continue →"}
+            </button>
+
+            <p className="mt-8 text-center text-xs text-gray-600">
+              Supports civil, mechanical, and infrastructure SOW documents.
+              <br />
+              Output matches standard Zambian tender BOQ format (ZMW).
+            </p>
+          </>
         )}
-
-        {error && (
-          <div className="mt-4 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
-            {error}
-          </div>
-        )}
-
-        <button
-          className={`mt-6 w-full py-3 rounded-lg font-semibold text-sm transition-all
-            ${file && !isProcessing
-              ? "bg-amber-400 hover:bg-amber-300 text-black cursor-pointer"
-              : "bg-white/5 text-gray-600 cursor-not-allowed"
-            }`}
-          disabled={!file || isProcessing}
-          onClick={handleGenerate}
-        >
-          {isProcessing ? STAGES[stage].label : "Generate BOQ →"}
-        </button>
-
-        <p className="mt-8 text-center text-xs text-gray-600">
-          Supports civil, mechanical, and infrastructure SOW documents.
-          <br />
-          Output matches standard Zambian tender BOQ format (ZMW).
-        </p>
       </div>
     </main>
   );

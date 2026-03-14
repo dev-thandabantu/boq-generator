@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateBOQ } from "@/lib/claude";
+import { stripe } from "@/lib/stripe";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -7,7 +8,7 @@ export const maxDuration = 120;
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { text } = body as { text: string };
+    const { text, session_id } = body as { text: string; session_id: string };
 
     if (!text || typeof text !== "string") {
       return NextResponse.json({ error: "text is required" }, { status: 400 });
@@ -18,6 +19,16 @@ export async function POST(req: NextRequest) {
         { error: "Text too short — could not extract meaningful content from PDF" },
         { status: 400 }
       );
+    }
+
+    // Verify payment
+    if (!session_id) {
+      return NextResponse.json({ error: "Payment required" }, { status: 402 });
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(session_id);
+    if (session.payment_status !== "paid") {
+      return NextResponse.json({ error: "Payment not completed" }, { status: 402 });
     }
 
     // Truncate to ~80k chars to stay within token limits
