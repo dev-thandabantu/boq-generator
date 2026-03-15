@@ -19,18 +19,26 @@ jobs:
       - name: Run migrations
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_POOLER_URL: ${{ secrets.DATABASE_POOLER_URL }}
         run: |
-          if [ -z "$DATABASE_URL" ]; then
-            echo "DATABASE_URL secret is not set"
+          if [ -z "$DATABASE_URL" ] && [ -z "$DATABASE_POOLER_URL" ]; then
+            echo "Neither DATABASE_URL nor DATABASE_POOLER_URL secret is set"
             exit 1
           fi
+
+          EFFECTIVE_DB_URL="$DATABASE_URL"
+          if [ -n "$DATABASE_POOLER_URL" ]; then
+            echo "Using DATABASE_POOLER_URL for migrations"
+            EFFECTIVE_DB_URL="$DATABASE_POOLER_URL"
+          fi
+          export EFFECTIVE_DB_URL
 
           eval "$(python3 - <<'PY'
           import os
           import shlex
           from urllib.parse import urlparse, unquote
 
-          raw = os.environ.get("DATABASE_URL", "")
+          raw = os.environ.get("EFFECTIVE_DB_URL", "")
           parsed = urlparse(raw)
 
           if parsed.scheme not in ("postgres", "postgresql"):
@@ -68,10 +76,11 @@ jobs:
               -f supabase/migrations/001_initial.sql
           }
 
-          if [[ "$PGHOST" =~ ^db\.([a-z0-9]+)\.supabase\.co$ ]]; then
+          if [[ "$PGHOST" =~ ^db\.([a-z0-9]+)\.supabase\.co$ ]] && [ -z "$DATABASE_POOLER_URL" ]; then
             if ! getent ahostsv4 "$PGHOST" >/dev/null; then
-              echo "::warning::Skipping migration: $PGHOST is IPv6-only and unreachable from current GitHub-hosted runners."
-              exit 0
+              echo "::error::Migration cannot run from GitHub Actions: $PGHOST is IPv6-only and DATABASE_POOLER_URL is not configured."
+              echo "::error::Set DATABASE_POOLER_URL secret to Supabase Session Pooler URI (IPv4-compatible)."
+              exit 1
             fi
           fi
 
