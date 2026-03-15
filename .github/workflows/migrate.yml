@@ -25,24 +25,84 @@ jobs:
             exit 1
           fi
 
-          DB_URL="$DATABASE_URL"
+          eval "$(python3 - <<'PY'
+          import os
+          import shlex
+          from urllib.parse import urlparse, unquote
 
-          # Force IPv4 on GitHub runners where IPv6 routes may be unavailable.
-          DB_HOST="$(echo "$DB_URL" | sed -E 's#^postgres(ql)?://[^@]+@([^:/?]+).*$#\2#')"
-          DB_HOST_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"
-          if [ -n "$DB_HOST_IPV4" ]; then
-            export PGHOSTADDR="$DB_HOST_IPV4"
-            echo "Using IPv4 host address for $DB_HOST"
-          else
-            echo "No IPv4 address found for $DB_HOST; proceeding with default resolution"
+          raw = os.environ.get("DATABASE_URL", "")
+          parsed = urlparse(raw)
+
+          if parsed.scheme not in ("postgres", "postgresql"):
+              raise SystemExit("DATABASE_URL must use postgres:// or postgresql://")
+
+          host = parsed.hostname or ""
+          port = str(parsed.port or 5432)
+          user = unquote(parsed.username or "")
+          password = unquote(parsed.password or "")
+          dbname = (parsed.path or "/postgres").lstrip("/") or "postgres"
+
+          def export_line(key: str, value: str) -> None:
+              print(f"export {key}={shlex.quote(value)}")
+
+          export_line("PGHOST", host)
+          export_line("PGPORT", port)
+          export_line("PGUSER", user)
+          export_line("PGPASSWORD", password)
+          export_line("PGDATABASE", dbname)
+          PY
+          )"
+
+          run_migration() {
+            local host="$1"
+            local port="$2"
+            local user="$3"
+
+            echo "Attempting migration via host=$host port=$port user=$user"
+            PGSSLMODE=require psql \
+              -h "$host" \
+              -p "$port" \
+              -U "$user" \
+              -d "$PGDATABASE" \
+              --set ON_ERROR_STOP=1 \
+              -f supabase/migrations/001_initial.sql
+          }
+
+          if run_migration "$PGHOST" "$PGPORT" "$PGUSER"; then
+            echo "Migration succeeded using direct DATABASE_URL host"
+            exit 0
           fi
 
-          if [[ "$DB_URL" == *\?* ]]; then
-            DB_URL="${DB_URL}&sslmode=require"
-          else
-            DB_URL="${DB_URL}?sslmode=require"
+          if [[ "$PGHOST" =~ ^db\.([a-z0-9]+)\.supabase\.co$ ]]; then
+            PROJECT_REF="${BASH_REMATCH[1]}"
+            echo "Direct host failed. Trying Supabase pooler fallback for project $PROJECT_REF"
+
+            REGIONS=(
+              us-east-1
+              us-west-1
+              us-west-2
+              eu-west-1
+              eu-west-2
+              eu-central-1
+              ap-southeast-1
+              ap-southeast-2
+              ap-northeast-1
+              ap-south-1
+              sa-east-1
+            )
+
+            for region in "${REGIONS[@]}"; do
+              pooler_host="aws-0-${region}.pooler.supabase.com"
+              for pooler_port in 6543 5432; do
+                for pooler_user in "postgres.${PROJECT_REF}" "postgres"; do
+                  if run_migration "$pooler_host" "$pooler_port" "$pooler_user"; then
+                    echo "Migration succeeded using pooler host $pooler_host"
+                    exit 0
+                  fi
+                done
+              done
+            done
           fi
 
-          psql "$DB_URL" \
-            --set ON_ERROR_STOP=1 \
-            -f supabase/migrations/001_initial.sql
+          echo "All migration connection attempts failed"
+          exit 1
