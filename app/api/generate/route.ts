@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateBOQ } from "@/lib/claude";
-import { stripe } from "@/lib/stripe";
+import { getStripe } from "@/lib/stripe";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -27,7 +27,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Verify payment
-    const stripeSession = await stripe.checkout.sessions.retrieve(session_id);
+    const stripeSession = await getStripe().checkout.sessions.retrieve(session_id);
     if (stripeSession.payment_status !== "paid") {
       return NextResponse.json({ error: "Payment not completed" }, { status: 402 });
     }
