@@ -26,6 +26,17 @@ jobs:
           fi
 
           DB_URL="$DATABASE_URL"
+
+          # Force IPv4 on GitHub runners where IPv6 routes may be unavailable.
+          DB_HOST="$(echo "$DB_URL" | sed -E 's#^postgres(ql)?://[^@]+@([^:/?]+).*$#\2#')"
+          DB_HOST_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"
+          if [ -n "$DB_HOST_IPV4" ]; then
+            export PGHOSTADDR="$DB_HOST_IPV4"
+            echo "Using IPv4 host address for $DB_HOST"
+          else
+            echo "No IPv4 address found for $DB_HOST; proceeding with default resolution"
+          fi
+
           if [[ "$DB_URL" == *\?* ]]; then
             DB_URL="${DB_URL}&sslmode=require"
           else
