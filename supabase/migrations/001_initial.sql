@@ -2,6 +2,9 @@
 -- BOQ Generator — initial schema (idempotent, safe to re-run)
 -- ============================================================
 
+-- Required for gen_random_uuid()
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 -- Profiles (linked 1:1 to auth.users, auto-created on signup)
 CREATE TABLE IF NOT EXISTS public.profiles (
   id          UUID REFERENCES auth.users(id) ON DELETE CASCADE PRIMARY KEY,
