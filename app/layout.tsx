@@ -1,11 +1,6 @@
 import type { Metadata } from "next";
-import { Geist } from "next/font/google";
+import { GeistSans } from "geist/font/sans";
 import "./globals.css";
-
-const geist = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
 
 export const metadata: Metadata = {
   title: "BOQ Generator — AI-powered Bill of Quantities",
@@ -18,7 +13,7 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" className="dark">
-      <body className={`${geist.variable} font-sans antialiased bg-[#0f0f0f] text-white`}>
+      <body className={`${GeistSans.variable} font-sans antialiased bg-[#0f0f0f] text-white`}>
         {children}
       </body>
     </html>
