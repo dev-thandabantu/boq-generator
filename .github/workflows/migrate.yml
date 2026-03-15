@@ -17,7 +17,21 @@ jobs:
         run: sudo apt-get install -y --no-install-recommends postgresql-client
 
       - name: Run migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          psql "${{ secrets.DATABASE_URL }}?sslmode=require" \
+          if [ -z "$DATABASE_URL" ]; then
+            echo "DATABASE_URL secret is not set"
+            exit 1
+          fi
+
+          DB_URL="$DATABASE_URL"
+          if [[ "$DB_URL" == *\?* ]]; then
+            DB_URL="${DB_URL}&sslmode=require"
+          else
+            DB_URL="${DB_URL}?sslmode=require"
+          fi
+
+          psql "$DB_URL" \
             --set ON_ERROR_STOP=1 \
             -f supabase/migrations/001_initial.sql
