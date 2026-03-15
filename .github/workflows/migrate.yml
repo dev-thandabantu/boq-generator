@@ -1,0 +1,23 @@
+name: Run DB Migrations
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  migrate:
+    name: Apply Supabase migrations
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install psql client
+        run: sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Run migrations
+        run: |
+          psql "${{ secrets.DATABASE_URL }}?sslmode=require" \
+            --set ON_ERROR_STOP=1 \
+            -f supabase/migrations/001_initial.sql
