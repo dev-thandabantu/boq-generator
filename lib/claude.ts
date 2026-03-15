@@ -1,7 +1,11 @@
 import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import type { BOQDocument } from "./types";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+function getGenAI() {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("GEMINI_API_KEY is not configured");
+  return new GoogleGenerativeAI(key);
+}
 
 const BOQ_RESPONSE_SCHEMA = {
   type: SchemaType.OBJECT,
@@ -62,7 +66,7 @@ RULES:
 13. The date should be today's date if not specified in the document`;
 
 export async function generateBOQ(sowText: string): Promise<BOQDocument> {
-  const model = genAI.getGenerativeModel({
+  const model = getGenAI().getGenerativeModel({
     model: "gemini-2.5-flash",
     systemInstruction: SYSTEM_PROMPT,
     generationConfig: {
