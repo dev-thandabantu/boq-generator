@@ -68,41 +68,12 @@ jobs:
               -f supabase/migrations/001_initial.sql
           }
 
-          if run_migration "$PGHOST" "$PGPORT" "$PGUSER"; then
-            echo "Migration succeeded using direct DATABASE_URL host"
-            exit 0
-          fi
-
           if [[ "$PGHOST" =~ ^db\.([a-z0-9]+)\.supabase\.co$ ]]; then
-            PROJECT_REF="${BASH_REMATCH[1]}"
-            echo "Direct host failed. Trying Supabase pooler fallback for project $PROJECT_REF"
-
-            REGIONS=(
-              us-east-1
-              us-west-1
-              us-west-2
-              eu-west-1
-              eu-west-2
-              eu-central-1
-              ap-southeast-1
-              ap-southeast-2
-              ap-northeast-1
-              ap-south-1
-              sa-east-1
-            )
-
-            for region in "${REGIONS[@]}"; do
-              pooler_host="aws-0-${region}.pooler.supabase.com"
-              for pooler_port in 6543 5432; do
-                for pooler_user in "postgres.${PROJECT_REF}" "postgres"; do
-                  if run_migration "$pooler_host" "$pooler_port" "$pooler_user"; then
-                    echo "Migration succeeded using pooler host $pooler_host"
-                    exit 0
-                  fi
-                done
-              done
-            done
+            if ! getent ahostsv4 "$PGHOST" >/dev/null; then
+              echo "::warning::Skipping migration: $PGHOST is IPv6-only and unreachable from current GitHub-hosted runners."
+              exit 0
+            fi
           fi
 
-          echo "All migration connection attempts failed"
-          exit 1
+          run_migration "$PGHOST" "$PGPORT" "$PGUSER"
+          echo "Migration succeeded using direct DATABASE_URL host"
