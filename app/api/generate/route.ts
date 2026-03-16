@@ -48,11 +48,17 @@ export async function POST(req: NextRequest) {
 
     const boq = await generateBOQ(truncated);
 
-    // Save to DB (using service client to bypass RLS)
-    const serviceClient = createServiceClient();
+    // Save to DB. Use service role when available, otherwise use user-scoped client.
+    const hasServiceRole = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
+    if (!hasServiceRole) {
+      console.warn(
+        "[generate] SUPABASE_SERVICE_ROLE_KEY not set; falling back to user-scoped inserts"
+      );
+    }
+    const dbClient = hasServiceRole ? createServiceClient() : supabase;
     const title = boq.project || "Untitled BOQ";
 
-    const { data: saved, error: dbError } = await serviceClient
+    const { data: saved, error: dbError } = await dbClient
       .from("boqs")
       .insert({
         user_id: user.id,
@@ -70,7 +76,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Record payment
-    await serviceClient.from("payments").upsert(
+    await dbClient.from("payments").upsert(
       {
         stripe_session_id: session_id,
         stripe_payment_intent: stripeSession.payment_intent as string | null,
