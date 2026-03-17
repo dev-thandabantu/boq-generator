@@ -146,12 +146,13 @@ app/
     extract/            # PDF → text extraction
     checkout/           # Create Stripe Checkout session
     generate/           # Gemini BOQ generation + save to DB
-    boqs/               # GET list, GET by id, PATCH (auto-save)
+    boqs/               # GET list, GET by id, PUT (auto-save), AI edit assistant (stream + preview)
     export/             # Excel export
     webhooks/stripe/    # Stripe payment confirmation
 
 lib/
   claude.ts             # Gemini API wrapper (generateBOQ)
+  boq-assistant.ts      # Gemini wrapper for BOQ-only edit instructions
   db/                   # Supabase client helpers + migrate.ts
   stripe.ts             # Lazy Stripe client
   types.ts              # Shared TypeScript types

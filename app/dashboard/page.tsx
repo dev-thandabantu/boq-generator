@@ -19,6 +19,8 @@ export default function DashboardPage() {
   const [boqs, setBOQs] = useState<BOQRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [opening, setOpening] = useState<string | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -38,9 +40,15 @@ export default function DashboardPage() {
   }, [router]);
 
   async function handleSignOut() {
+    setSigningOut(true);
     const supabase = createClient();
     await supabase.auth.signOut();
     router.push("/login");
+  }
+
+  async function handleOpen(id: string) {
+    setOpening(id);
+    router.push(`/boq/${id}`);
   }
 
   async function handleDelete(id: string) {
@@ -82,9 +90,10 @@ export default function DashboardPage() {
             <span className="text-xs text-gray-500 hidden sm:block">{user?.email}</span>
             <button
               onClick={handleSignOut}
+              disabled={signingOut}
               className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
             >
-              Sign out
+              {signingOut ? "Signing out..." : "Sign out"}
             </button>
           </div>
         </div>
@@ -151,10 +160,11 @@ export default function DashboardPage() {
 
                   <div className="flex items-center gap-2 shrink-0">
                     <button
-                      onClick={() => router.push(`/boq/${boq.id}`)}
-                      className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-white text-xs font-medium transition-colors"
+                      onClick={() => handleOpen(boq.id)}
+                      disabled={opening === boq.id}
+                      className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-white text-xs font-medium transition-colors disabled:opacity-60"
                     >
-                      Open
+                      {opening === boq.id ? "Opening..." : "Open"}
                     </button>
                     <button
                       onClick={() => handleDelete(boq.id)}
