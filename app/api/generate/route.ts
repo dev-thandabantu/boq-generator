@@ -6,6 +6,38 @@ import { createClient, createServiceClient } from "@/lib/supabase/server";
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
+function classifyGenerateError(message: string): { status: number; safeMessage: string } {
+  const lower = message.toLowerCase();
+  const isQuota =
+    lower.includes("429") ||
+    lower.includes("quota") ||
+    lower.includes("too many requests");
+  if (isQuota) {
+    return {
+      status: 429,
+      safeMessage: "AI rate limit reached. Please wait a minute and try again.",
+    };
+  }
+
+  const isTemporaryUnavailable =
+    lower.includes("503") ||
+    lower.includes("service unavailable") ||
+    lower.includes("high demand") ||
+    lower.includes("temporarily unavailable") ||
+    lower.includes("timeout") ||
+    lower.includes("etimedout") ||
+    lower.includes("econnreset");
+
+  if (isTemporaryUnavailable) {
+    return {
+      status: 503,
+      safeMessage: "AI service is temporarily busy. Please try again in a moment.",
+    };
+  }
+
+  return { status: 500, safeMessage: "BOQ generation failed. Please try again." };
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -93,10 +125,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error("BOQ generation error:", err);
     const message = err instanceof Error ? err.message : "Unknown error";
-    const isQuota =
-      message.includes("429") ||
-      message.includes("quota") ||
-      message.includes("Too Many Requests");
-    return NextResponse.json({ error: message }, { status: isQuota ? 429 : 500 });
+    const classified = classifyGenerateError(message);
+    return NextResponse.json({ error: classified.safeMessage }, { status: classified.status });
   }
 }

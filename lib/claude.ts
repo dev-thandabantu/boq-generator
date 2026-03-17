@@ -1,6 +1,10 @@
 import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import type { BOQDocument } from "./types";
 
+const PRIMARY_MODEL = process.env.GEMINI_MODEL_PRIMARY || "gemini-2.5-flash";
+const FALLBACK_MODEL = process.env.GEMINI_MODEL_FALLBACK || "gemini-2.0-flash";
+const MAX_ATTEMPTS_PER_MODEL = 3;
+
 function getGenAI() {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("GEMINI_API_KEY is not configured");
@@ -65,9 +69,28 @@ RULES:
 12. Number items within each bill using letters (A, B, C...) for simple bills, or decimal (1.1, 1.2...) for complex ones
 13. The date should be today's date if not specified in the document`;
 
-export async function generateBOQ(sowText: string): Promise<BOQDocument> {
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientGeminiError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+  return (
+    msg.includes("503") ||
+    msg.includes("service unavailable") ||
+    msg.includes("high demand") ||
+    msg.includes("temporar") ||
+    msg.includes("timeout") ||
+    msg.includes("etimedout") ||
+    msg.includes("econnreset") ||
+    msg.includes("429") ||
+    msg.includes("quota")
+  );
+}
+
+async function generateWithModel(modelName: string, sowText: string): Promise<BOQDocument> {
   const model = getGenAI().getGenerativeModel({
-    model: "gemini-2.5-flash",
+    model: modelName,
     systemInstruction: SYSTEM_PROMPT,
     generationConfig: {
       responseMimeType: "application/json",
@@ -89,4 +112,35 @@ export async function generateBOQ(sowText: string): Promise<BOQDocument> {
   }
 
   return boq;
+}
+
+export async function generateBOQ(sowText: string): Promise<BOQDocument> {
+  const models = [PRIMARY_MODEL, FALLBACK_MODEL].filter(
+    (value, index, arr) => Boolean(value) && arr.indexOf(value) === index
+  );
+
+  let lastError: unknown;
+
+  for (const modelName of models) {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt += 1) {
+      try {
+        return await generateWithModel(modelName, sowText);
+      } catch (err) {
+        lastError = err;
+        if (!isTransientGeminiError(err)) {
+          throw err;
+        }
+
+        const isLastAttempt = attempt === MAX_ATTEMPTS_PER_MODEL;
+        if (!isLastAttempt) {
+          const backoffMs = Math.min(1000 * 2 ** (attempt - 1), 4000);
+          await delay(backoffMs);
+        }
+      }
+    }
+  }
+
+  throw lastError instanceof Error
+    ? new Error(`Gemini temporarily unavailable after retries: ${lastError.message}`)
+    : new Error("Gemini temporarily unavailable after retries");
 }
