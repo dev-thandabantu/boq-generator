@@ -48,49 +48,60 @@ export async function POST(req: NextRequest) {
 
     const boq = await generateBOQ(truncated);
 
-    // Save to DB (using service client to bypass RLS)
-    const serviceClient = createServiceClient();
     const title = boq.project || "Untitled BOQ";
 
-    const { data: saved, error: dbError } = await serviceClient
-      .from("boqs")
-      .insert({
-        user_id: user.id,
-        title,
-        data: boq,
-        stripe_session_id: session_id,
-      })
-      .select("id")
-      .single();
+    // Save to DB (using service client to bypass RLS). If saving fails,
+    // still return generated data so the user can continue in-session.
+    try {
+      const serviceClient = createServiceClient();
+      const { data: saved, error: dbError } = await serviceClient
+        .from("boqs")
+        .insert({
+          user_id: user.id,
+          title,
+          data: boq,
+          stripe_session_id: session_id,
+        })
+        .select("id")
+        .single();
 
-    if (dbError) {
-      console.error("Failed to save BOQ to DB:", dbError);
-      // Still return the BOQ so the user isn't left hanging
+      if (dbError) {
+        console.error("Failed to save BOQ to DB:", dbError);
+        return NextResponse.json({ boq, boq_id: null });
+      }
+
+      // Record payment
+      await serviceClient.from("payments").upsert(
+        {
+          stripe_session_id: session_id,
+          stripe_payment_intent: stripeSession.payment_intent as string | null,
+          user_id: user.id,
+          amount_cents: stripeSession.amount_total ?? 10000,
+          currency: stripeSession.currency ?? "usd",
+          status: "completed",
+          boq_id: saved.id,
+        },
+        { onConflict: "stripe_session_id", ignoreDuplicates: false }
+      );
+
+      return NextResponse.json({ boq, boq_id: saved.id });
+    } catch (saveErr) {
+      console.error("Failed to initialize/save with service Supabase client:", saveErr);
       return NextResponse.json({ boq, boq_id: null });
     }
-
-    // Record payment
-    await serviceClient.from("payments").upsert(
-      {
-        stripe_session_id: session_id,
-        stripe_payment_intent: stripeSession.payment_intent as string | null,
-        user_id: user.id,
-        amount_cents: stripeSession.amount_total ?? 10000,
-        currency: stripeSession.currency ?? "usd",
-        status: "completed",
-        boq_id: saved.id,
-      },
-      { onConflict: "stripe_session_id", ignoreDuplicates: false }
-    );
-
-    return NextResponse.json({ boq, boq_id: saved.id });
   } catch (err) {
     console.error("BOQ generation error:", err);
     const message = err instanceof Error ? err.message : "Unknown error";
+    const isExtractionFailure =
+      message.includes("Could not extract BOQ structure") ||
+      message.includes("no measurable items found");
     const isQuota =
       message.includes("429") ||
       message.includes("quota") ||
       message.includes("Too Many Requests");
-    return NextResponse.json({ error: message }, { status: isQuota ? 429 : 500 });
+    return NextResponse.json(
+      { error: message },
+      { status: isExtractionFailure ? 422 : isQuota ? 429 : 500 }
+    );
   }
 }

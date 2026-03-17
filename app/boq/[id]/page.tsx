@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
-import type { BOQDocument, BOQBill, BOQItem } from "@/lib/types";
+import type { BOQBill, BOQDocument, BOQItem, BOQQualitySummary } from "@/lib/types";
 
 interface DBBoq {
   id: string;
@@ -88,9 +88,11 @@ export default function BOQPage() {
         item_no: "",
         description: "",
         unit: "Item",
-        qty: 1,
+        qty: null,
         rate: null,
         amount: null,
+        quantity_source: "assumed",
+        quantity_confidence: 0.4,
       };
       return { ...b, items: [...b.items, newItem] };
     });
@@ -108,6 +110,15 @@ export default function BOQPage() {
 
   async function handleExport() {
     if (!boq) return;
+
+    const summary = getQualitySummary(boq);
+    if (summary.qty_missing > 0 || summary.low_confidence > 0) {
+      const proceed = window.confirm(
+        `There are ${summary.qty_missing} unresolved quantities and ${summary.low_confidence} low-confidence items. Export anyway?`
+      );
+      if (!proceed) return;
+    }
+
     setExporting(true);
     try {
       const res = await fetch("/api/export", {
@@ -141,11 +152,13 @@ export default function BOQPage() {
 
   if (!boq) return null;
 
+  const qualitySummary = getQualitySummary(boq);
+  const hasQuantityIssues = qualitySummary.qty_missing > 0 || qualitySummary.low_confidence > 0;
+
   const grandTotal = boq.bills.reduce((sum, b) => {
     const billTotal = b.items.reduce((s, it) => {
       if (it.is_header) return s;
-      const amt =
-        it.amount ?? (it.qty !== null && it.rate !== null ? it.qty * it.rate : null);
+      const amt = it.amount ?? (it.qty !== null && it.rate !== null ? it.qty * it.rate : null);
       return amt !== null ? s + amt : s;
     }, 0);
     return sum + billTotal;
@@ -153,7 +166,6 @@ export default function BOQPage() {
 
   return (
     <div className="min-h-screen bg-[#0a0a0a]">
-      {/* Sticky header */}
       <header className="sticky top-0 z-20 border-b border-white/10 bg-[#0a0a0a]/95 backdrop-blur">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
           <div className="flex items-center gap-4 min-w-0">
@@ -170,9 +182,7 @@ export default function BOQPage() {
           </div>
 
           <div className="flex items-center gap-3 shrink-0">
-            {!saved && (
-              <span className="text-xs text-gray-600 hidden sm:block">Saving…</span>
-            )}
+            {!saved && <span className="text-xs text-gray-600 hidden sm:block">Saving…</span>}
             {grandTotal > 0 && (
               <span className="hidden sm:block text-xs text-gray-500">
                 Total:{" "}
@@ -191,7 +201,6 @@ export default function BOQPage() {
           </div>
         </div>
 
-        {/* Editable meta */}
         <div className="max-w-7xl mx-auto px-4 pb-2 flex flex-wrap gap-4 text-xs text-gray-500">
           <MetaField
             label="Project"
@@ -208,30 +217,32 @@ export default function BOQPage() {
             value={boq.prepared_by}
             onChange={(v) => updateBOQ({ ...boq, prepared_by: v })}
           />
-          <MetaField
-            label="Date"
-            value={boq.date}
-            onChange={(v) => updateBOQ({ ...boq, date: v })}
-          />
+          <MetaField label="Date" value={boq.date} onChange={(v) => updateBOQ({ ...boq, date: v })} />
         </div>
       </header>
 
-      {/* Bills */}
       <main className="max-w-7xl mx-auto px-2 sm:px-4 py-6 space-y-6">
+        {hasQuantityIssues && (
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm">
+            <p className="text-amber-300 font-semibold">Quantity Issues</p>
+            <p className="text-amber-100/80 mt-1">
+              {qualitySummary.qty_missing} unresolved quantities, {qualitySummary.low_confidence} low-confidence
+              items. Export is allowed, but review these lines first.
+            </p>
+          </div>
+        )}
+
         {boq.bills.map((bill, billIdx) => (
           <BillSection
             key={billIdx}
             bill={bill}
             billIdx={billIdx}
-            onUpdateItem={(itemIdx, field, value) =>
-              updateItem(billIdx, itemIdx, field, value)
-            }
+            onUpdateItem={(itemIdx, field, value) => updateItem(billIdx, itemIdx, field, value)}
             onAddItem={() => addItem(billIdx)}
             onRemoveItem={(itemIdx) => removeItem(billIdx, itemIdx)}
           />
         ))}
 
-        {/* Grand Total */}
         <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 flex justify-between items-center">
           <span className="font-bold text-white">TOTAL (VAT EXCLUSIVE)</span>
           <span className="font-mono font-bold text-amber-400 text-lg">
@@ -241,6 +252,32 @@ export default function BOQPage() {
       </main>
     </div>
   );
+}
+
+function getQualitySummary(boq: BOQDocument): BOQQualitySummary {
+  let total = 0;
+  let qtyWithEvidence = 0;
+  let qtyMissing = 0;
+  let lowConfidence = 0;
+
+  for (const bill of boq.bills) {
+    for (const item of bill.items) {
+      if (item.is_header) continue;
+      total += 1;
+      if (item.qty == null) qtyMissing += 1;
+      if (item.qty != null && item.source_excerpt && item.source_excerpt.trim().length >= 12) {
+        qtyWithEvidence += 1;
+      }
+      if ((item.quantity_confidence ?? 0.4) < 0.6) lowConfidence += 1;
+    }
+  }
+
+  return {
+    total_items: total,
+    qty_with_evidence: qtyWithEvidence,
+    qty_missing: qtyMissing,
+    low_confidence: lowConfidence,
+  };
 }
 
 function MetaField({
@@ -273,11 +310,7 @@ function BillSection({
 }: {
   bill: BOQBill;
   billIdx: number;
-  onUpdateItem: (
-    itemIdx: number,
-    field: keyof BOQItem,
-    value: string | number | null
-  ) => void;
+  onUpdateItem: (itemIdx: number, field: keyof BOQItem, value: string | number | null) => void;
   onAddItem: () => void;
   onRemoveItem: (itemIdx: number) => void;
 }) {
@@ -285,8 +318,7 @@ function BillSection({
 
   const billTotal = bill.items.reduce((s, it) => {
     if (it.is_header) return s;
-    const amt =
-      it.amount ?? (it.qty !== null && it.rate !== null ? it.qty * it.rate : null);
+    const amt = it.amount ?? (it.qty !== null && it.rate !== null ? it.qty * it.rate : null);
     return amt !== null ? s + amt : s;
   }, 0);
 
@@ -299,9 +331,7 @@ function BillSection({
         <div className="flex items-center gap-3">
           <span className="text-xs text-gray-500 font-mono">BILL {bill.number}</span>
           <span className="font-semibold text-white text-sm">{bill.title}</span>
-          <span className="text-xs text-gray-600">
-            ({bill.items.filter((i) => !i.is_header).length} items)
-          </span>
+          <span className="text-xs text-gray-600">({bill.items.filter((i) => !i.is_header).length} items)</span>
         </div>
         <div className="flex items-center gap-4">
           {billTotal > 0 && (
@@ -370,24 +400,18 @@ function ItemRow({
   onUpdate: (field: keyof BOQItem, value: string | number | null) => void;
   onRemove: () => void;
 }) {
-  const amount =
-    item.amount ??
-    (item.qty !== null && item.rate !== null ? item.qty * item.rate : null);
+  const amount = item.amount ?? (item.qty !== null && item.rate !== null ? item.qty * item.rate : null);
+  const unresolvedQty = item.qty == null;
+  const lowConfidence = (item.quantity_confidence ?? 0.4) < 0.6;
 
   if (item.is_header) {
     return (
       <tr className="border-b border-white/5 bg-[#161616]">
-        <td
-          colSpan={6}
-          className="px-3 py-2 text-gray-400 font-semibold text-xs uppercase tracking-wide"
-        >
+        <td colSpan={6} className="px-3 py-2 text-gray-400 font-semibold text-xs uppercase tracking-wide">
           {item.description}
         </td>
         <td>
-          <button
-            onClick={onRemove}
-            className="px-1 text-gray-700 hover:text-red-400 text-xs"
-          >
+          <button onClick={onRemove} className="px-1 text-gray-700 hover:text-red-400 text-xs">
             ✕
           </button>
         </td>
@@ -396,7 +420,11 @@ function ItemRow({
   }
 
   return (
-    <tr className="border-b border-white/5 hover:bg-white/[0.02] group">
+    <tr
+      className={`border-b border-white/5 group ${
+        unresolvedQty || lowConfidence ? "bg-amber-500/[0.04] hover:bg-amber-500/[0.07]" : "hover:bg-white/[0.02]"
+      }`}
+    >
       <td className="px-3 py-1.5">
         <input
           className="boq-cell-editable text-gray-400 font-mono w-full"
@@ -411,6 +439,14 @@ function ItemRow({
           rows={item.description.length > 80 ? 2 : 1}
           onChange={(e) => onUpdate("description", e.target.value)}
         />
+        <div className="mt-1 flex flex-wrap gap-1.5">
+          {unresolvedQty && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-400/20 text-amber-300">Missing qty</span>}
+          {lowConfidence && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-400/20 text-orange-300">
+              Low conf {((item.quantity_confidence ?? 0.4) * 100).toFixed(0)}%
+            </span>
+          )}
+        </div>
       </td>
       <td className="px-2 py-1.5 text-center">
         <input
