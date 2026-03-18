@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import type { User } from "@supabase/supabase-js";
+import Footer from "@/components/Footer";
 
 interface BOQRow {
   id: string;
@@ -77,7 +78,7 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="min-h-screen bg-[#0a0a0a]">
+    <div className="min-h-screen bg-[#0a0a0a] flex flex-col">
       {/* Nav */}
       <header className="border-b border-white/10 bg-[#0a0a0a]/95 backdrop-blur sticky top-0 z-20">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
@@ -109,7 +110,7 @@ export default function DashboardPage() {
             </p>
           </div>
           <a
-            href="/"
+            href="/upload"
             className="px-4 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-black text-sm font-semibold transition-colors"
           >
             + New BOQ
@@ -123,7 +124,7 @@ export default function DashboardPage() {
             </div>
             <p className="text-gray-500">No BOQs yet. Upload a SOW to get started.</p>
             <a
-              href="/"
+              href="/upload"
               className="inline-block px-6 py-2.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-black font-semibold text-sm transition-colors"
             >
               Generate your first BOQ →
@@ -180,6 +181,7 @@ export default function DashboardPage() {
           </div>
         )}
       </main>
+      <Footer />
     </div>
   );
 }

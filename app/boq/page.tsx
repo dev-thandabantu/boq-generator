@@ -9,10 +9,9 @@ export default function BOQPage() {
   const router = useRouter();
   useEffect(() => {
     // Handle old sessionStorage-based flow as a fallback
-    const raw = sessionStorage.getItem("boq_data");
+    const raw = localStorage.getItem("boq_data");
     if (raw) {
-      // They have data from an old session — take them to dashboard
-      sessionStorage.removeItem("boq_data");
+      localStorage.removeItem("boq_data");
     }
     router.replace("/dashboard");
   }, [router]);

@@ -148,6 +148,100 @@ async function generateWithModel(
   return boq;
 }
 
+// ─── SOW Validation ────────────────────────────────────────────────────────
+
+const SOW_VALIDATION_SCHEMA = {
+  type: SchemaType.OBJECT,
+  properties: {
+    isSOW: {
+      type: SchemaType.BOOLEAN,
+      description: "True if the document is a Scope of Work, project specification, or similar construction/engineering document suitable for BOQ extraction",
+    },
+    reason: {
+      type: SchemaType.STRING,
+      description: "One sentence explaining the determination",
+    },
+  },
+  required: ["isSOW", "reason"],
+};
+
+export async function validateSOW(text: string): Promise<{ isSOW: boolean; reason: string }> {
+  const preview = text.slice(0, 3000);
+  const model = getGenAI().getGenerativeModel({
+    model: FALLBACK_MODEL,
+    generationConfig: {
+      responseMimeType: "application/json",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      responseSchema: SOW_VALIDATION_SCHEMA as any,
+      temperature: 0,
+    },
+  });
+  const result = await model.generateContent(
+    `Analyse this document excerpt. Determine whether it is a Scope of Work, project specification, bill of quantities, or engineering/construction document that could be used to generate a Bill of Quantities.\n\nDocument excerpt:\n${preview}`
+  );
+  return JSON.parse(result.response.text()) as { isSOW: boolean; reason: string };
+}
+
+// ─── BOQ Quality Scoring ────────────────────────────────────────────────────
+
+const QA_SCHEMA = {
+  type: SchemaType.OBJECT,
+  properties: {
+    score: { type: SchemaType.NUMBER, description: "Overall quality score from 1 (very poor) to 10 (excellent)" },
+    grade: { type: SchemaType.STRING, description: "One of: Strong, Good, Fair, Weak" },
+    summary: { type: SchemaType.STRING, description: "One sentence overall assessment" },
+    flags: {
+      type: SchemaType.ARRAY,
+      items: { type: SchemaType.STRING },
+      description: "List of specific quality warnings or issues found (empty array if none)",
+    },
+  },
+  required: ["score", "grade", "summary", "flags"],
+};
+
+export async function scoreBOQ(boq: import("./types").BOQDocument): Promise<{
+  score: number;
+  grade: "Strong" | "Good" | "Fair" | "Weak";
+  summary: string;
+  flags: string[];
+}> {
+  const model = getGenAI().getGenerativeModel({
+    model: FALLBACK_MODEL,
+    generationConfig: {
+      responseMimeType: "application/json",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      responseSchema: QA_SCHEMA as any,
+      temperature: 0,
+    },
+  });
+
+  const totalItems = boq.bills.reduce((s, b) => s + b.items.filter((i) => !i.is_header).length, 0);
+  const pricedItems = boq.bills.reduce(
+    (s, b) => s + b.items.filter((i) => !i.is_header && i.rate !== null).length,
+    0
+  );
+  const billTitles = boq.bills.map((b) => b.title).join(", ");
+  const hasPreliminaries = boq.bills.some((b) =>
+    b.title.toUpperCase().includes("PRELIM")
+  );
+  const emptyDescriptions = boq.bills.reduce(
+    (s, b) => s + b.items.filter((i) => !i.is_header && (!i.description || i.description.trim().length < 5)).length,
+    0
+  );
+  const zeroQty = boq.bills.reduce(
+    (s, b) => s + b.items.filter((i) => !i.is_header && i.qty === 0).length,
+    0
+  );
+
+  const summary = `Project: ${boq.project}. Bills (${boq.bills.length}): ${billTitles}. Total line items: ${totalItems}. Priced items: ${pricedItems}. Has Preliminaries bill: ${hasPreliminaries}. Empty descriptions: ${emptyDescriptions}. Zero-quantity items: ${zeroQty}.`;
+
+  const result = await model.generateContent(
+    `You are a senior quantity surveyor reviewing a generated Bill of Quantities for quality. Score this BOQ and identify any issues.\n\nBOQ summary:\n${summary}\n\nFull BOQ (JSON):\n${JSON.stringify(boq, null, 2).slice(0, 8000)}`
+  );
+
+  return JSON.parse(result.response.text());
+}
+
 export async function generateBOQ(
   sowText: string,
   opts?: { suggestRates?: boolean }

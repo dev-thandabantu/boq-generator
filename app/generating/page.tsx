@@ -25,7 +25,7 @@ function GeneratingContent() {
         return;
       }
 
-      const text = sessionStorage.getItem("boq_text");
+      const text = localStorage.getItem("boq_text");
       if (!text) {
         setError(
           "Your PDF session expired. If you were charged, please contact us with your payment reference."
@@ -33,7 +33,7 @@ function GeneratingContent() {
         return;
       }
 
-      const suggestRates = sessionStorage.getItem("boq_suggest_rates") === "1";
+      const suggestRates = localStorage.getItem("boq_suggest_rates") === "1";
 
       let progressTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -72,7 +72,8 @@ function GeneratingContent() {
         const { boq, boq_id } = await res.json();
         setProgress(100);
 
-        sessionStorage.removeItem("boq_text");
+        localStorage.removeItem("boq_text");
+        localStorage.removeItem("boq_suggest_rates");
 
         if (boq_id) {
           router.push(`/boq/${boq_id}`);
