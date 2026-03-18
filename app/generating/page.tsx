@@ -33,6 +33,8 @@ function GeneratingContent() {
         return;
       }
 
+      const suggestRates = sessionStorage.getItem("boq_suggest_rates") === "1";
+
       let progressTimer: ReturnType<typeof setInterval> | null = null;
 
       try {
@@ -51,7 +53,7 @@ function GeneratingContent() {
         const res = await fetch("/api/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, session_id: sessionId }),
+          body: JSON.stringify({ text, session_id: sessionId, suggest_rates: suggestRates }),
         });
 
         setProgress(80);

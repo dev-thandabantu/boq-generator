@@ -73,6 +73,28 @@ RULES:
 13. Use is_header: true for subsection group labels within a bill (e.g. "EARTHWORKS", "CONCRETE WORKS") — these have no item_no, no qty, no unit
 14. The date should be today's date if not specified in the document`;
 
+const RATES_INSTRUCTION = `
+RATE ESTIMATION:
+- Suggest realistic ZMW rates for every line item based on the current Zambian construction market (Q1 2026)
+- Rates must be all-in unit rates covering materials + labour + plant + overhead (contractor does not add a separate profit line)
+- Base rates on standard Zambian construction costs. Indicative ranges to calibrate against:
+    Earthworks strip/excavation: 80–200 ZMW/m³
+    Hardcore fill & compact: 120–250 ZMW/m³
+    Concrete blinding (Grade 10): 400–600 ZMW/m²
+    Concrete Grade 25 (foundations/slabs): 2,500–4,500 ZMW/m³
+    Reinforcement bar (8–16mm): 30–55 ZMW/kg
+    Blockwork 200mm: 280–450 ZMW/m²
+    Brickwork 110mm: 200–350 ZMW/m²
+    Plastering (single coat): 40–80 ZMW/m²
+    Ceramic floor tiles (supply & lay): 200–400 ZMW/m²
+    PVC ceiling (supply & fix): 120–200 ZMW/m²
+    Painting (2 coats): 30–60 ZMW/m²
+    Galvanised steel roofing sheets: 180–350 ZMW/m²
+    100mm PVC pipe (supply & lay): 120–220 ZMW/m
+    Mobilisation/demobilisation: use a lump sum proportional to project scale (50,000–500,000 ZMW typical range)
+- When uncertain, use a conservative (lower-end) estimate rather than leaving null
+- Only leave rate as null if the item is a header (is_header: true) or the quantity genuinely cannot be determined`;
+
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -92,10 +114,18 @@ function isTransientGeminiError(err: unknown): boolean {
   );
 }
 
-async function generateWithModel(modelName: string, sowText: string): Promise<BOQDocument> {
+async function generateWithModel(
+  modelName: string,
+  sowText: string,
+  suggestRates: boolean
+): Promise<BOQDocument> {
+  const systemInstruction = suggestRates
+    ? SYSTEM_PROMPT + RATES_INSTRUCTION
+    : SYSTEM_PROMPT;
+
   const model = getGenAI().getGenerativeModel({
     model: modelName,
-    systemInstruction: SYSTEM_PROMPT,
+    systemInstruction,
     generationConfig: {
       responseMimeType: "application/json",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -118,7 +148,11 @@ async function generateWithModel(modelName: string, sowText: string): Promise<BO
   return boq;
 }
 
-export async function generateBOQ(sowText: string): Promise<BOQDocument> {
+export async function generateBOQ(
+  sowText: string,
+  opts?: { suggestRates?: boolean }
+): Promise<BOQDocument> {
+  const suggestRates = opts?.suggestRates ?? false;
   const models = [PRIMARY_MODEL, FALLBACK_MODEL].filter(
     (value, index, arr) => Boolean(value) && arr.indexOf(value) === index
   );
@@ -128,7 +162,7 @@ export async function generateBOQ(sowText: string): Promise<BOQDocument> {
   for (const modelName of models) {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt += 1) {
       try {
-        return await generateWithModel(modelName, sowText);
+        return await generateWithModel(modelName, sowText, suggestRates);
       } catch (err) {
         lastError = err;
         if (!isTransientGeminiError(err)) {
