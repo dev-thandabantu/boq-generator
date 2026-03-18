@@ -65,9 +65,13 @@ RULES:
 8. Start descriptions with action verbs: Supply, Install, Excavate, Cast, Allow for, Provide, Lay, Fix, etc.
 9. Include material specifications, dimensions, and standards where mentioned
 10. Add is_header: true for subsection titles within a bill (no item_no, no qty)
-11. Include standard preliminary items even if not explicitly stated (Setting out, Insurances, Site clearing, Temporary works, etc.)
-12. Number items within each bill using letters (A, B, C...) for simple bills, or decimal (1.1, 1.2...) for complex ones
-13. The date should be today's date if not specified in the document`;
+11. Bill No. 1 (PRELIMINARY AND GENERAL ITEMS) must always include at minimum:
+    - "Allow for mobilisation, including but not limited to preparation, transportation and erecting constructional plant, equipment, offices and preparatory works in commencing the execution of the works." (unit: LS, qty: 1)
+    - "Allow for demobilisation, including but not limited to removing and shipping construction plant and equipment, returning staff, removing temporary works, and cleaning the site as specified by the site Engineer." (unit: LS, qty: 1)
+    Add further preliminary items as appropriate to the project scope (setting out, site security, temporary works, insurances, progress photos, etc.)
+12. Number items using bill-prefixed decimals: Bill No. 1 items are 1.1, 1.2, 1.3 etc.; Bill No. 2 items are 2.1, 2.2, 2.3 etc.; and so on for all bills
+13. Use is_header: true for subsection group labels within a bill (e.g. "EARTHWORKS", "CONCRETE WORKS") — these have no item_no, no qty, no unit
+14. The date should be today's date if not specified in the document`;
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
