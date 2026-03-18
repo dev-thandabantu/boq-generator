@@ -12,6 +12,7 @@ export default function UploadPage() {
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [suggestRates, setSuggestRates] = useState(false);
 
   function handleFile(f: File) {
     if (!f.name.toLowerCase().endsWith(".pdf")) {
@@ -50,6 +51,7 @@ export default function UploadPage() {
 
   async function handleCheckout() {
     if (!file) return;
+    sessionStorage.setItem("boq_suggest_rates", suggestRates ? "1" : "0");
     setStage("paying");
     setError(null);
 
@@ -150,6 +152,29 @@ export default function UploadPage() {
                 ))}
               </ul>
             </div>
+
+            {/* Rate estimates toggle */}
+            <label className="flex items-start gap-3 cursor-pointer select-none group">
+              <div className="relative mt-0.5 shrink-0">
+                <input
+                  type="checkbox"
+                  className="sr-only peer"
+                  checked={suggestRates}
+                  onChange={(e) => setSuggestRates(e.target.checked)}
+                  disabled={stage === "paying"}
+                />
+                <div className="w-9 h-5 rounded-full border border-white/20 bg-white/5 peer-checked:bg-amber-400 peer-checked:border-amber-400 transition-colors" />
+                <div className="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-gray-400 peer-checked:bg-black peer-checked:translate-x-4 transition-all" />
+              </div>
+              <div>
+                <p className="text-sm text-white font-medium group-has-[:checked]:text-amber-400 transition-colors">
+                  Include AI rate estimates
+                </p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Gemini suggests typical ZMW rates based on the Zambian construction market. Review and adjust before use.
+                </p>
+              </div>
+            </label>
 
             <button
               className="w-full py-3.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-black font-semibold text-sm transition-colors disabled:opacity-70 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
