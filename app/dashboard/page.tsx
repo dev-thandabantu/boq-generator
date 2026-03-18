@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import type { User } from "@supabase/supabase-js";
 import Footer from "@/components/Footer";
+import { usePostHog } from "posthog-js/react";
 
 interface BOQRow {
   id: string;
@@ -16,6 +17,7 @@ interface BOQRow {
 
 export default function DashboardPage() {
   const router = useRouter();
+  const ph = usePostHog();
   const [user, setUser] = useState<User | null>(null);
   const [boqs, setBOQs] = useState<BOQRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -29,6 +31,7 @@ export default function DashboardPage() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) { router.replace("/login"); return; }
       setUser(user);
+      ph.identify(user.id, { email: user.email });
 
       const res = await fetch("/api/boqs");
       if (res.ok) {

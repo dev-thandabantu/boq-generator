@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 import type { BOQDocument, BOQBill, BOQItem, BOQQualityScore } from "@/lib/types";
+import { usePostHog } from "posthog-js/react";
 
 interface DBBoq {
   id: string;
@@ -32,6 +33,7 @@ export default function BOQPage() {
   const { id } = useParams<{ id: string }>();
   const [boq, setBOQ] = useState<BOQDocument | null>(null);
   const [boqId] = useState(id);
+  const ph = usePostHog();
   const [exporting, setExporting] = useState(false);
   const [saved, setSaved] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -153,6 +155,11 @@ export default function BOQPage() {
 
   async function handleExport() {
     if (!boq) return;
+    ph.capture("excel_downloaded", {
+      boq_id: boqId,
+      bill_count: boq.bills.length,
+      item_count: boq.bills.reduce((s, b) => s + b.items.filter((i) => !i.is_header).length, 0),
+    });
     setExporting(true);
     try {
       const res = await fetch("/api/export", {
@@ -182,6 +189,7 @@ export default function BOQPage() {
     const instruction = assistantInput.trim();
     if (!instruction) return;
 
+    ph.capture("assistant_used", { boq_id: boqId });
     setAssistantInput("");
     setAssistantPreview(null);
     setAssistantMessages((prev) => [...prev, { role: "user", content: instruction }]);

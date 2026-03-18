@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import { Progress } from "@/components/ui/progress";
 import Footer from "@/components/Footer";
+import { usePostHog } from "posthog-js/react";
 
 type Stage = "idle" | "extracting" | "ready" | "paying" | "error";
 
@@ -15,6 +16,7 @@ export default function UploadPage() {
   const [dragging, setDragging] = useState(false);
   const [suggestRates, setSuggestRates] = useState(false);
   const [sowWarning, setSowWarning] = useState<string | null>(null);
+  const ph = usePostHog();
 
   function handleFile(f: File) {
     const name = f.name.toLowerCase();
@@ -46,8 +48,14 @@ export default function UploadPage() {
       const { text, pages: p, isSOW, sowWarning: warning } = await res.json();
       localStorage.setItem("boq_text", text);
       setPages(p);
+      ph.capture("document_uploaded", {
+        file_type: file.name.toLowerCase().endsWith(".pdf") ? "pdf" : "docx",
+        pages: p,
+        is_sow: isSOW,
+      });
       if (!isSOW && warning) {
         setSowWarning(warning);
+        ph.capture("sow_warning_shown", { reason: warning });
       }
       setStage("ready");
     } catch (err) {
@@ -60,6 +68,7 @@ export default function UploadPage() {
   async function handleCheckout() {
     if (!file) return;
     localStorage.setItem("boq_suggest_rates", suggestRates ? "1" : "0");
+    ph.capture("payment_initiated", { suggest_rates: suggestRates });
     setStage("paying");
     setError(null);
 

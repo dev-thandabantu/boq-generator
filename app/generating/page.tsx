@@ -3,11 +3,13 @@
 import { useEffect, useRef, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Progress } from "@/components/ui/progress";
+import { usePostHog } from "posthog-js/react";
 
 function GeneratingContent() {
   const router = useRouter();
   const params = useSearchParams();
   const sessionId = params.get("session_id");
+  const ph = usePostHog();
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState(10);
   const [statusText, setStatusText] = useState(
@@ -71,6 +73,15 @@ function GeneratingContent() {
 
         const { boq, boq_id } = await res.json();
         setProgress(100);
+
+        ph.capture("boq_generated", {
+          boq_id,
+          bill_count: boq?.bills?.length ?? 0,
+          item_count: (boq?.bills ?? []).reduce(
+            (s: number, b: { items?: unknown[] }) => s + (b.items?.length ?? 0), 0
+          ),
+          suggest_rates: suggestRates,
+        });
 
         localStorage.removeItem("boq_text");
         localStorage.removeItem("boq_suggest_rates");
