@@ -33,6 +33,16 @@ export async function POST(req: NextRequest) {
 
   if (event.type === "checkout.session.completed") {
     const session = event.data.object as Stripe.Checkout.Session;
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      console.error(
+        "[webhook] SUPABASE_SERVICE_ROLE_KEY is not configured; cannot persist payment"
+      );
+      return NextResponse.json(
+        { error: "SUPABASE_SERVICE_ROLE_KEY is not configured" },
+        { status: 500 }
+      );
+    }
+
     const supabase = createServiceClient();
 
     const userId = session.metadata?.user_id ?? null;

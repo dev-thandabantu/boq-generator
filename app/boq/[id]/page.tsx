@@ -10,6 +10,23 @@ interface DBBoq {
   data: BOQDocument;
 }
 
+interface AssistantMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface AssistantDiff {
+  billDelta: number;
+  itemDelta: number;
+  pricedItemsDelta: number;
+}
+
+interface AssistantPreview {
+  summary: string;
+  proposedBoq: BOQDocument;
+  diff: AssistantDiff;
+}
+
 export default function BOQPage() {
   const router = useRouter();
   const { id } = useParams<{ id: string }>();
@@ -18,6 +35,21 @@ export default function BOQPage() {
   const [exporting, setExporting] = useState(false);
   const [saved, setSaved] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [assistantInput, setAssistantInput] = useState("");
+  const [assistantBusy, setAssistantBusy] = useState(false);
+  const [assistantPaneOpen, setAssistantPaneOpen] = useState(true);
+  const [assistantDrawerOpen, setAssistantDrawerOpen] = useState(false);
+  const [assistantPreview, setAssistantPreview] = useState<AssistantPreview | null>(null);
+  const [assistantStatus, setAssistantStatus] = useState<string | null>(null);
+  const [undoCount, setUndoCount] = useState(0);
+  const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([
+    {
+      role: "assistant",
+      content:
+        "Describe the BOQ change you want, and I will apply it directly to this BOQ only.",
+    },
+  ]);
+  const undoStack = useRef<BOQDocument[]>([]);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -142,6 +174,151 @@ export default function BOQPage() {
     }
   }
 
+  async function handleAssistantSubmit() {
+    if (!boq || assistantBusy) return;
+
+    const instruction = assistantInput.trim();
+    if (!instruction) return;
+
+    setAssistantInput("");
+    setAssistantPreview(null);
+    setAssistantMessages((prev) => [...prev, { role: "user", content: instruction }]);
+    setAssistantBusy(true);
+    setAssistantStatus("Planning edits...");
+
+    let assistantDraft = "";
+    let receivedProposal = false;
+    setAssistantMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+
+    try {
+      const res = await fetch(`/api/boqs/${boqId}/assistant/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction, boq }),
+      });
+
+      if (!res.ok) {
+        const { error: e } = await res.json();
+        throw new Error(e || "Assistant request failed");
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("Streaming is not available");
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      function updateDraft() {
+        setAssistantMessages((prev) => {
+          const next = [...prev];
+          const lastIdx = next.length - 1;
+          if (lastIdx < 0) return prev;
+          if (next[lastIdx].role !== "assistant") return prev;
+          next[lastIdx] = { role: "assistant", content: assistantDraft };
+          return next;
+        });
+      }
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+
+        for (const evt of events) {
+          const lines = evt.split("\n");
+          const eventLine = lines.find((line) => line.startsWith("event:"));
+          const dataLine = lines.find((line) => line.startsWith("data:"));
+          if (!eventLine || !dataLine) continue;
+
+          const eventType = eventLine.replace("event:", "").trim();
+          const payload = JSON.parse(dataLine.replace("data:", "").trim()) as {
+            token?: string;
+            step?: string;
+            summary?: string;
+            proposed_boq?: BOQDocument;
+            diff?: AssistantDiff;
+            message?: string;
+          };
+
+          if (eventType === "status") {
+            if (payload.step === "planning") setAssistantStatus("Thinking through your request...");
+            if (payload.step === "proposing")
+              setAssistantStatus("Building BOQ proposal for your review...");
+          }
+
+          if (eventType === "token" && payload.token) {
+            assistantDraft += payload.token;
+            updateDraft();
+          }
+
+          if (eventType === "result" && payload.proposed_boq && payload.diff) {
+            receivedProposal = true;
+            const summary = payload.summary || "Prepared BOQ edits for your review.";
+            if (!assistantDraft.trim()) {
+              assistantDraft = summary;
+              updateDraft();
+            }
+
+            setAssistantPreview({
+              summary,
+              proposedBoq: payload.proposed_boq,
+              diff: payload.diff,
+            });
+          }
+
+          if (eventType === "error") {
+            throw new Error(payload.message || "Assistant request failed");
+          }
+        }
+      }
+
+      if (!receivedProposal && !assistantDraft.trim()) {
+        throw new Error("Assistant did not return a proposal. Please try again.");
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Assistant failed";
+      setAssistantMessages((prev) => [
+        ...prev.slice(0, -1),
+        {
+          role: "assistant",
+          content: message,
+        },
+      ]);
+    } finally {
+      setAssistantBusy(false);
+      setAssistantStatus(null);
+    }
+  }
+
+  function handleApplyPreview() {
+    if (!boq || !assistantPreview) return;
+    undoStack.current.push(boq);
+    setUndoCount(undoStack.current.length);
+    updateBOQ(assistantPreview.proposedBoq);
+    setAssistantMessages((prev) => [
+      ...prev,
+      {
+        role: "assistant",
+        content: "Applied proposed BOQ changes.",
+      },
+    ]);
+    setAssistantPreview(null);
+  }
+
+  function handleUndoLastAIEdit() {
+    const previous = undoStack.current.pop();
+    if (!previous) return;
+    setUndoCount(undoStack.current.length);
+    updateBOQ(previous);
+    setAssistantMessages((prev) => [
+      ...prev,
+      { role: "assistant", content: "Reverted the last AI-applied BOQ changes." },
+    ]);
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -198,6 +375,18 @@ export default function BOQPage() {
             >
               {exporting ? "Exporting…" : "Download Excel"}
             </button>
+            <button
+              onClick={() => setAssistantPaneOpen((v) => !v)}
+              className="hidden xl:inline-flex px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-gray-200 text-sm"
+            >
+              {assistantPaneOpen ? "Hide assistant" : "Show assistant"}
+            </button>
+            <button
+              onClick={() => setAssistantDrawerOpen(true)}
+              className="xl:hidden px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-gray-200 text-sm"
+            >
+              Assistant
+            </button>
           </div>
         </div>
 
@@ -221,34 +410,107 @@ export default function BOQPage() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-2 sm:px-4 py-6 space-y-6">
-        {hasQuantityIssues && (
-          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm">
-            <p className="text-amber-300 font-semibold">Quantity Issues</p>
-            <p className="text-amber-100/80 mt-1">
-              {qualitySummary.qty_missing} unresolved quantities, {qualitySummary.low_confidence} low-confidence
-              items. Export is allowed, but review these lines first.
-            </p>
+     
+      <main className="max-w-[1500px] mx-auto px-2 sm:px-4 py-6 space-y-4">
+        {!assistantPaneOpen && (
+          <div className="hidden xl:flex justify-end">
+            <button
+              onClick={() => setAssistantPaneOpen(true)}
+              className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-gray-200 text-sm"
+            >
+              Open assistant pane
+            </button>
           </div>
         )}
 
-        {boq.bills.map((bill, billIdx) => (
-          <BillSection
-            key={billIdx}
-            bill={bill}
-            billIdx={billIdx}
-            onUpdateItem={(itemIdx, field, value) => updateItem(billIdx, itemIdx, field, value)}
-            onAddItem={() => addItem(billIdx)}
-            onRemoveItem={(itemIdx) => removeItem(billIdx, itemIdx)}
-          />
-        ))}
+        <div
+          className={`grid gap-4 ${
+            assistantPaneOpen ? "grid-cols-1 xl:grid-cols-[minmax(0,1fr)_420px]" : "grid-cols-1"
+          }`}
+        >
+          <div className="space-y-6 min-w-0">
+            {hasQuantityIssues && (
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm">
+                <p className="text-amber-300 font-semibold">Quantity Issues</p>
+                <p className="text-amber-100/80 mt-1">
+                  {qualitySummary.qty_missing} unresolved quantities, {qualitySummary.low_confidence}{" "}
+                  low-confidence items. Export is allowed, but review these lines first.
+                </p>
+              </div>
+            )}
 
-        <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 flex justify-between items-center">
-          <span className="font-bold text-white">TOTAL (VAT EXCLUSIVE)</span>
-          <span className="font-mono font-bold text-amber-400 text-lg">
-            ZMW {grandTotal.toLocaleString("en-ZM", { minimumFractionDigits: 2 })}
-          </span>
+            {boq.bills.map((bill, billIdx) => (
+              <BillSection
+                key={billIdx}
+                bill={bill}
+                billIdx={billIdx}
+                onUpdateItem={(itemIdx, field, value) =>
+                  updateItem(billIdx, itemIdx, field, value)
+                }
+                onAddItem={() => addItem(billIdx)}
+                onRemoveItem={(itemIdx) => removeItem(billIdx, itemIdx)}
+              />
+            ))}
+
+            <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 flex justify-between items-center">
+              <span className="font-bold text-white">TOTAL (VAT EXCLUSIVE)</span>
+              <span className="font-mono font-bold text-amber-400 text-lg">
+                ZMW {grandTotal.toLocaleString("en-ZM", { minimumFractionDigits: 2 })}
+              </span>
+            </div>
+          </div>
+
+          {assistantPaneOpen && (
+            <aside className="hidden xl:block">
+              <div className="sticky top-24">
+                <AssistantPanel
+                  assistantBusy={assistantBusy}
+                  assistantStatus={assistantStatus}
+                  undoCount={undoCount}
+                  assistantMessages={assistantMessages}
+                  assistantInput={assistantInput}
+                  assistantPreview={assistantPreview}
+                  onUndo={handleUndoLastAIEdit}
+                  onPickPrompt={setAssistantInput}
+                  onDiscardPreview={() => setAssistantPreview(null)}
+                  onApplyPreview={handleApplyPreview}
+                  onSubmit={handleAssistantSubmit}
+                  onInputChange={setAssistantInput}
+                />
+              </div>
+            </aside>
+          )}
         </div>
+
+        {assistantDrawerOpen && (
+          <div className="xl:hidden fixed inset-0 z-40 bg-black/60 backdrop-blur-sm">
+            <div className="absolute inset-y-0 right-0 w-full max-w-md bg-[#0e0d0b] border-l border-amber-500/20 p-3 overflow-y-auto">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-amber-300">BOQ Assistant</h3>
+                <button
+                  onClick={() => setAssistantDrawerOpen(false)}
+                  className="px-2 py-1 rounded-md bg-white/5 text-gray-200 text-xs"
+                >
+                  Close
+                </button>
+              </div>
+              <AssistantPanel
+                assistantBusy={assistantBusy}
+                assistantStatus={assistantStatus}
+                undoCount={undoCount}
+                assistantMessages={assistantMessages}
+                assistantInput={assistantInput}
+                assistantPreview={assistantPreview}
+                onUndo={handleUndoLastAIEdit}
+                onPickPrompt={setAssistantInput}
+                onDiscardPreview={() => setAssistantPreview(null)}
+                onApplyPreview={handleApplyPreview}
+                onSubmit={handleAssistantSubmit}
+                onInputChange={setAssistantInput}
+              />
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );
@@ -278,6 +540,195 @@ function getQualitySummary(boq: BOQDocument): BOQQualitySummary {
     qty_missing: qtyMissing,
     low_confidence: lowConfidence,
   };
+}
+
+function AssistantPanel({
+  assistantBusy,
+  assistantStatus,
+  undoCount,
+  assistantMessages,
+  assistantInput,
+  assistantPreview,
+  onUndo,
+  onPickPrompt,
+  onDiscardPreview,
+  onApplyPreview,
+  onSubmit,
+  onInputChange,
+}: {
+  assistantBusy: boolean;
+  assistantStatus: string | null;
+  undoCount: number;
+  assistantMessages: AssistantMessage[];
+  assistantInput: string;
+  assistantPreview: AssistantPreview | null;
+  onUndo: () => void;
+  onPickPrompt: (value: string) => void;
+  onDiscardPreview: () => void;
+  onApplyPreview: () => void;
+  onSubmit: () => void;
+  onInputChange: (value: string) => void;
+}) {
+  const threadRef = useRef<HTMLDivElement | null>(null);
+  const hasUserMessages = assistantMessages.some((message) => message.role === "user");
+  const showWelcome = !hasUserMessages && !assistantPreview && !assistantBusy;
+
+  function displayMessage(content: string) {
+    return content
+      .replace(/\s\*\s/g, "\n• ")
+      .replace(/\*\s/g, "• ");
+  }
+
+  useEffect(() => {
+    if (!threadRef.current) return;
+    threadRef.current.scrollTo({
+      top: threadRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [assistantMessages, assistantStatus]);
+
+  const quickPrompts = [
+    "Add sample rates and amounts to all measurable items.",
+    "Regroup electrical items into a separate bill.",
+    "Rewrite item descriptions to be concise and technical.",
+  ];
+
+  return (
+    <section className="rounded-xl border border-amber-500/20 bg-[#100f0c] h-[calc(100vh-6.5rem)] flex flex-col overflow-hidden">
+      <div className="px-4 py-3 border-b border-amber-500/10 bg-[#15130f]">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-amber-300">AI BOQ Assistant</h2>
+            <p className="text-[11px] text-gray-500 mt-0.5">
+              BOQ-only edits. Generate proposal, review diff, then apply.
+            </p>
+          </div>
+          <button
+            onClick={onUndo}
+            disabled={undoCount === 0 || assistantBusy}
+            className="px-2.5 py-1 rounded-md text-[11px] bg-white/5 hover:bg-white/10 text-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Undo ({undoCount})
+          </button>
+        </div>
+        {assistantStatus && (
+          <div className="mt-2 inline-flex items-center rounded-full bg-amber-500/15 border border-amber-500/30 px-2.5 py-1 text-[11px] text-amber-200">
+            {assistantStatus}
+          </div>
+        )}
+      </div>
+
+      <div className="flex-1 min-h-0 p-3 flex flex-col gap-3">
+        {showWelcome ? (
+          <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3 space-y-3">
+            <p className="text-xs text-gray-300 leading-relaxed">
+              Tell me what to change in this BOQ and I will generate a safe proposal first.
+            </p>
+            <div className="grid gap-2">
+              {quickPrompts.map((prompt) => (
+                <button
+                  key={prompt}
+                  onClick={() => onPickPrompt(prompt)}
+                  disabled={assistantBusy}
+                  className="text-left px-2.5 py-2 rounded-md bg-white/5 hover:bg-white/10 text-[11px] text-gray-200"
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="flex-1 min-h-[280px] rounded-lg border border-white/10 bg-[#0b0a08] overflow-hidden">
+            <div ref={threadRef} className="h-full overflow-y-auto p-2.5 space-y-2">
+              {assistantMessages.map((message, idx) => (
+                <div
+                  key={idx}
+                  className={`max-w-[95%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
+                    message.role === "user"
+                      ? "ml-auto bg-white/10 text-gray-100 border border-white/10"
+                      : "mr-auto bg-amber-500/10 text-amber-50 border border-amber-500/20"
+                  }`}
+                >
+                  <span className="block text-[10px] uppercase tracking-wide opacity-70 mb-1">
+                    {message.role === "user" ? "You" : "Assistant"}
+                  </span>
+                  <p className="whitespace-pre-wrap break-words">{displayMessage(message.content)}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {!showWelcome && (
+          <div className="flex flex-wrap gap-2">
+            {quickPrompts.map((prompt) => (
+              <button
+                key={prompt}
+                onClick={() => onPickPrompt(prompt)}
+                disabled={assistantBusy}
+                className="px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 text-[11px] text-gray-300"
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {assistantPreview && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+            <p className="text-xs text-amber-200 font-semibold mb-1">Preview ready</p>
+            <p className="text-xs text-gray-300 mb-2">{assistantPreview.summary}</p>
+            <div className="flex flex-wrap gap-2 mb-3 text-[11px] text-gray-300">
+              <span className="px-2 py-1 rounded bg-white/5">
+                Bills: {assistantPreview.diff.billDelta >= 0 ? "+" : ""}
+                {assistantPreview.diff.billDelta}
+              </span>
+              <span className="px-2 py-1 rounded bg-white/5">
+                Items: {assistantPreview.diff.itemDelta >= 0 ? "+" : ""}
+                {assistantPreview.diff.itemDelta}
+              </span>
+              <span className="px-2 py-1 rounded bg-white/5">
+                Priced items: {assistantPreview.diff.pricedItemsDelta >= 0 ? "+" : ""}
+                {assistantPreview.diff.pricedItemsDelta}
+              </span>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={onApplyPreview}
+                className="px-3 py-1.5 rounded-md bg-amber-400 hover:bg-amber-300 text-black text-xs font-semibold"
+              >
+                Apply changes
+              </button>
+              <button
+                onClick={onDiscardPreview}
+                className="px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-gray-200 text-xs"
+              >
+                Discard
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="space-y-2 mt-auto pt-1 border-t border-white/10">
+          <label className="text-[11px] text-gray-500">Instruction</label>
+          <textarea
+            className="boq-cell-editable text-white w-full min-h-[76px]"
+            placeholder="Example: Add a new bill for Drainage Works and include 3 typical items with units and qty 1 where missing."
+            value={assistantInput}
+            onChange={(e) => onInputChange(e.target.value)}
+            disabled={assistantBusy}
+          />
+          <button
+            onClick={onSubmit}
+            disabled={assistantBusy || !assistantInput.trim()}
+            className="w-full px-4 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-black text-sm font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {assistantBusy ? "Thinking…" : "Generate proposal"}
+          </button>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function MetaField({

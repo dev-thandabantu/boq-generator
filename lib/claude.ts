@@ -43,6 +43,10 @@ type QuantityPassResponse = {
   }>;
 };
 
+const PRIMARY_MODEL = process.env.GEMINI_MODEL_PRIMARY || "gemini-2.5-flash";
+const FALLBACK_MODEL = process.env.GEMINI_MODEL_FALLBACK || "gemini-2.0-flash";
+const MAX_ATTEMPTS_PER_MODEL = 3;
+
 function getGenAI() {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("GEMINI_API_KEY is not configured");
@@ -465,3 +469,4 @@ export function hasSufficientEvidence(excerpt: string | null): boolean {
   if (!excerpt) return false;
   return excerpt.trim().length >= 12;
 }
+

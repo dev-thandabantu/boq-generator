@@ -10,6 +10,9 @@ function GeneratingContent() {
   const sessionId = params.get("session_id");
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState(10);
+  const [statusText, setStatusText] = useState(
+    "AI is reading your Scope of Work and extracting bill items..."
+  );
   const started = useRef(false);
 
   useEffect(() => {
@@ -30,7 +33,20 @@ function GeneratingContent() {
         return;
       }
 
+      let progressTimer: ReturnType<typeof setInterval> | null = null;
+
       try {
+        const startedAt = Date.now();
+        progressTimer = setInterval(() => {
+          setProgress((p) => (p < 94 ? p + 3 : p));
+          const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+          if (elapsed > 20) {
+            setStatusText("Still working. Complex BOQs can take a bit longer...");
+          } else if (elapsed > 8) {
+            setStatusText("Classifying trades, quantities, and units...");
+          }
+        }, 2000);
+
         setProgress(30);
         const res = await fetch("/api/generate", {
           method: "POST",
@@ -46,6 +62,8 @@ function GeneratingContent() {
             throw new Error("Payment could not be verified. Please contact support.");
           if (res.status === 429)
             throw new Error("AI quota exceeded. Please try again in a minute.");
+          if (res.status === 503)
+            throw new Error("AI service is temporarily busy. Please wait a moment and try again.");
           throw new Error(e || "BOQ generation failed");
         }
 
@@ -63,11 +81,14 @@ function GeneratingContent() {
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Something went wrong";
+        setStatusText("Generation stopped due to an error.");
         setError(
           msg === "Failed to fetch"
             ? "Network error. Check your connection and try again."
             : msg
         );
+      } finally {
+        if (progressTimer) clearInterval(progressTimer);
       }
     }
 
@@ -128,9 +149,7 @@ function GeneratingContent() {
             </div>
             <div>
               <h2 className="text-2xl font-bold text-white mb-2">Generating your BOQ</h2>
-              <p className="text-gray-400 text-sm">
-                AI is reading your Scope of Work and extracting bill items…
-              </p>
+              <p className="text-gray-400 text-sm">{statusText}</p>
             </div>
             <div className="space-y-2">
               <Progress value={progress} className="h-1.5 bg-white/10" />

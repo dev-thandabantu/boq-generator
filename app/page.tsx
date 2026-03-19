@@ -94,7 +94,7 @@ export default function UploadPage() {
       </div>
 
       <div className="relative z-10 w-full max-w-xl animate-fade-up">
-        {stage === "ready" ? (
+        {stage === "ready" || stage === "paying" ? (
           /* ── Pricing screen ── */
           <div className="text-center space-y-6">
             <div>
@@ -152,15 +152,30 @@ export default function UploadPage() {
             </div>
 
             <button
-              className="w-full py-3.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-black font-semibold text-sm transition-colors"
+              className="w-full py-3.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-black font-semibold text-sm transition-colors disabled:opacity-70 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
               onClick={handleCheckout}
+              disabled={stage === "paying"}
             >
-              Pay $100 &amp; Generate BOQ →
+              {stage === "paying" ? (
+                <>
+                  <span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-black/60 border-t-transparent animate-spin" />
+                  Opening secure checkout...
+                </>
+              ) : (
+                "Pay $100 & Generate BOQ →"
+              )}
             </button>
 
             <p className="text-xs text-gray-600">
               Secure payment via Stripe. You will be redirected back after payment.
             </p>
+
+            {stage === "paying" && (
+              <div className="space-y-2">
+                <Progress value={92} className="h-1.5 bg-white/10" />
+                <p className="text-xs text-gray-400">Redirecting to Stripe checkout...</p>
+              </div>
+            )}
           </div>
         ) : (
           /* ── Upload screen ── */
@@ -234,7 +249,9 @@ export default function UploadPage() {
               <div className="mt-6 space-y-2">
                 <Progress value={stage === "extracting" ? 60 : 90} className="h-1.5 bg-white/10" />
                 <p className="text-sm text-gray-400 text-center">
-                  {stage === "extracting" ? "Extracting text from PDF…" : "Redirecting to payment…"}
+                  {stage === "extracting"
+                    ? "Extracting text from PDF..."
+                    : "Redirecting to payment..."}
                 </p>
               </div>
             )}

@@ -6,6 +6,38 @@ import { createClient, createServiceClient } from "@/lib/supabase/server";
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
+function classifyGenerateError(message: string): { status: number; safeMessage: string } {
+  const lower = message.toLowerCase();
+  const isQuota =
+    lower.includes("429") ||
+    lower.includes("quota") ||
+    lower.includes("too many requests");
+  if (isQuota) {
+    return {
+      status: 429,
+      safeMessage: "AI rate limit reached. Please wait a minute and try again.",
+    };
+  }
+
+  const isTemporaryUnavailable =
+    lower.includes("503") ||
+    lower.includes("service unavailable") ||
+    lower.includes("high demand") ||
+    lower.includes("temporarily unavailable") ||
+    lower.includes("timeout") ||
+    lower.includes("etimedout") ||
+    lower.includes("econnreset");
+
+  if (isTemporaryUnavailable) {
+    return {
+      status: 503,
+      safeMessage: "AI service is temporarily busy. Please try again in a moment.",
+    };
+  }
+
+  return { status: 500, safeMessage: "BOQ generation failed. Please try again." };
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -50,11 +82,18 @@ export async function POST(req: NextRequest) {
 
     const title = boq.project || "Untitled BOQ";
 
-    // Save to DB (using service client to bypass RLS). If saving fails,
-    // still return generated data so the user can continue in-session.
+    
+    // Save to DB. Use service role when available, otherwise use user-scoped client.
+    const hasServiceRole = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
+    if (!hasServiceRole) {
+      console.warn(
+        "[generate] SUPABASE_SERVICE_ROLE_KEY not set; falling back to user-scoped inserts"
+      );
+    }
+    const dbClient = hasServiceRole ? createServiceClient() : supabase;
+
     try {
-      const serviceClient = createServiceClient();
-      const { data: saved, error: dbError } = await serviceClient
+      const { data: saved, error: dbError } = await dbClient
         .from("boqs")
         .insert({
           user_id: user.id,
@@ -70,8 +109,9 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ boq, boq_id: null });
       }
 
-      // Record payment
-      await serviceClient.from("payments").upsert(
+      
+      // Record payment when we have a saved BOQ
+      await dbClient.from("payments").upsert(
         {
           stripe_session_id: session_id,
           stripe_payment_intent: stripeSession.payment_intent as string | null,
@@ -84,24 +124,26 @@ export async function POST(req: NextRequest) {
         { onConflict: "stripe_session_id", ignoreDuplicates: false }
       );
 
+      
       return NextResponse.json({ boq, boq_id: saved.id });
     } catch (saveErr) {
-      console.error("Failed to initialize/save with service Supabase client:", saveErr);
+      console.error("Failed to save BOQ or record payment:", saveErr);
       return NextResponse.json({ boq, boq_id: null });
     }
   } catch (err) {
     console.error("BOQ generation error:", err);
     const message = err instanceof Error ? err.message : "Unknown error";
+    
     const isExtractionFailure =
       message.includes("Could not extract BOQ structure") ||
       message.includes("no measurable items found");
-    const isQuota =
-      message.includes("429") ||
-      message.includes("quota") ||
-      message.includes("Too Many Requests");
+    if (isExtractionFailure) {
+      return NextResponse.json({ error: message }, { status: 422 });
+    }
+    const classified = classifyGenerateError(message);
     return NextResponse.json(
-      { error: message },
-      { status: isExtractionFailure ? 422 : isQuota ? 429 : 500 }
+      { error: classified.safeMessage },
+      { status: classified.status }
     );
   }
 }
