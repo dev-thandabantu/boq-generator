@@ -103,7 +103,7 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 py-10">
+      <main className="w-full flex-1 max-w-5xl mx-auto px-4 py-8 sm:py-10">
         {/* Header row */}
         <div className="flex items-center justify-between mb-8">
           <div>
