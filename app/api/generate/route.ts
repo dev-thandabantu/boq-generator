@@ -41,7 +41,11 @@ function classifyGenerateError(message: string): { status: number; safeMessage: 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { text, session_id } = body as { text: string; session_id: string };
+    const { text, session_id, suggest_rates } = body as {
+      text: string;
+      session_id: string;
+      suggest_rates?: boolean;
+    };
 
     if (!text || typeof text !== "string") {
       return NextResponse.json({ error: "text is required" }, { status: 400 });
@@ -74,23 +78,31 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    // Resolve DB client early so we can use it for idempotency check
+    const hasServiceRole = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
+    if (!hasServiceRole) {
+      console.warn("[generate] SUPABASE_SERVICE_ROLE_KEY not set; falling back to user-scoped inserts");
+    }
+    const dbClient = hasServiceRole ? createServiceClient() : supabase;
+
+    // Idempotency: if this Stripe session already produced a BOQ, return it
+    const { data: existingBoq } = await dbClient
+      .from("boqs")
+      .select("id, data")
+      .eq("stripe_session_id", session_id)
+      .maybeSingle();
+
+    if (existingBoq) {
+      return NextResponse.json({ boq: existingBoq.data, boq_id: existingBoq.id });
+    }
+
     // Truncate to ~80k chars to stay within token limits
     const truncated =
       text.length > 80000 ? text.slice(0, 80000) + "\n...[truncated]" : text;
 
-    const boq = await generateBOQ(truncated);
+    const boq = await generateBOQ(truncated, { suggestRates: suggest_rates ?? false });
 
     const title = boq.project || "Untitled BOQ";
-
-    
-    // Save to DB. Use service role when available, otherwise use user-scoped client.
-    const hasServiceRole = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
-    if (!hasServiceRole) {
-      console.warn(
-        "[generate] SUPABASE_SERVICE_ROLE_KEY not set; falling back to user-scoped inserts"
-      );
-    }
-    const dbClient = hasServiceRole ? createServiceClient() : supabase;
 
     try {
       const { data: saved, error: dbError } = await dbClient

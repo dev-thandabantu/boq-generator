@@ -37,7 +37,7 @@ export async function POST(req: NextRequest) {
         },
       ],
       success_url: `${origin}/generating?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${origin}/`,
+      cancel_url: `${origin}/upload`,
     });
 
     return NextResponse.json({ url: session.url });

@@ -147,6 +147,7 @@ TASK:
 Given SOW text and a predefined BOQ item list, return quantity data keyed by item_key.
 
 RULES:
+
 1. Never change item_key values.
 2. Any non-null qty must include source_excerpt evidence copied from SOW text.
 3. Use quantity_source:
@@ -156,25 +157,6 @@ RULES:
 4. If uncertain, set qty null and quantity_source assumed.
 5. Set quantity_confidence between 0 and 1.
 6. Use standard units (m, m², m³, No., Item, LS, kg, t).`;
-
-export async function generateBOQ(sowText: string): Promise<BOQDocument> {
-  const structureRaw = await generateStructure(sowText, false);
-  let structure = normalizeStructure(structureRaw);
-
-  if (countNonHeaderItems(structure) === 0) {
-    const retryRaw = await generateStructure(sowText, true);
-    structure = normalizeStructure(retryRaw);
-  }
-
-  if (countNonHeaderItems(structure) === 0) {
-    throw new Error(
-      "Could not extract BOQ structure from SOW (no measurable items found). Please upload a clearer scope document."
-    );
-  }
-
-  const quantitiesRaw = await extractQuantities(sowText, structure);
-  return mergeStructureAndQuantities(structure, quantitiesRaw);
-}
 
 async function generateStructure(
   sowText: string,
@@ -227,7 +209,7 @@ async function callModel<T>({
   temperature: number;
 }): Promise<T> {
   const model = getGenAI().getGenerativeModel({
-    model: "gemini-2.5-flash",
+    model: PRIMARY_MODEL,
     systemInstruction,
     generationConfig: {
       responseMimeType: "application/json",
@@ -282,6 +264,133 @@ function countNonHeaderItems(structure: BOQStructureArtifact): number {
     (sum, bill) => sum + bill.items.filter((item) => !item.is_header).length,
     0
   );
+}
+
+/**
+ * SOW Validation
+ * 
+ * This function validates whether the provided text is a Scope of Work, project specification, or similar construction/engineering document suitable for BOQ extraction.
+ * 
+ * @param text - The text to validate.
+ * @returns An object containing the validation result and the reason for the determination.
+ */
+const SOW_VALIDATION_SCHEMA = {
+  type: SchemaType.OBJECT,
+  properties: {
+    isSOW: {
+      type: SchemaType.BOOLEAN,
+      description: "True if the document is a Scope of Work, project specification, or similar construction/engineering document suitable for BOQ extraction",
+    },
+    reason: {
+      type: SchemaType.STRING,
+      description: "One sentence explaining the determination",
+    },
+  },
+  required: ["isSOW", "reason"],
+};
+
+export async function validateSOW(text: string): Promise<{ isSOW: boolean; reason: string }> {
+  const preview = text.slice(0, 3000);
+  const model = getGenAI().getGenerativeModel({
+    model: FALLBACK_MODEL,
+    generationConfig: {
+      responseMimeType: "application/json",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      responseSchema: SOW_VALIDATION_SCHEMA as any,
+      temperature: 0,
+    },
+  });
+  const result = await model.generateContent(
+    `Analyse this document excerpt. Determine whether it is a Scope of Work, project specification, bill of quantities, or engineering/construction document that could be used to generate a Bill of Quantities.\n\nDocument excerpt:\n${preview}`
+  );
+  return JSON.parse(result.response.text()) as { isSOW: boolean; reason: string };
+}
+
+// ─── BOQ Quality Scoring ────────────────────────────────────────────────────
+
+const QA_SCHEMA = {
+  type: SchemaType.OBJECT,
+  properties: {
+    score: { type: SchemaType.NUMBER, description: "Overall quality score from 1 (very poor) to 10 (excellent)" },
+    grade: { type: SchemaType.STRING, description: "One of: Strong, Good, Fair, Weak" },
+    summary: { type: SchemaType.STRING, description: "One sentence overall assessment" },
+    flags: {
+      type: SchemaType.ARRAY,
+      items: { type: SchemaType.STRING },
+      description: "List of specific quality warnings or issues found (empty array if none)",
+    },
+  },
+  required: ["score", "grade", "summary", "flags"],
+};
+
+export async function scoreBOQ(boq: import("./types").BOQDocument): Promise<{
+  score: number;
+  grade: "Strong" | "Good" | "Fair" | "Weak";
+  summary: string;
+  flags: string[];
+}> {
+  const model = getGenAI().getGenerativeModel({
+    
+    model: FALLBACK_MODEL,
+    generationConfig: {
+      responseMimeType: "application/json",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      
+      responseSchema: QA_SCHEMA as any,
+      temperature: 0,
+    },
+  });
+
+  const totalItems = boq.bills.reduce((s, b) => s + b.items.filter((i) => !i.is_header).length, 0);
+  const pricedItems = boq.bills.reduce(
+    (s, b) => s + b.items.filter((i) => !i.is_header && i.rate !== null).length,
+    0
+  );
+  const billTitles = boq.bills.map((b) => b.title).join(", ");
+  const hasPreliminaries = boq.bills.some((b) =>
+    b.title.toUpperCase().includes("PRELIM")
+  );
+  const emptyDescriptions = boq.bills.reduce(
+    (s, b) => s + b.items.filter((i) => !i.is_header && (!i.description || i.description.trim().length < 5)).length,
+    0
+  );
+  const zeroQty = boq.bills.reduce(
+    (s, b) => s + b.items.filter((i) => !i.is_header && i.qty === 0).length,
+    0
+  );
+
+  const summary = `Project: ${boq.project}. Bills (${boq.bills.length}): ${billTitles}. Total line items: ${totalItems}. Priced items: ${pricedItems}. Has Preliminaries bill: ${hasPreliminaries}. Empty descriptions: ${emptyDescriptions}. Zero-quantity items: ${zeroQty}.`;
+
+  
+  const result = await model.generateContent(
+    `You are a senior quantity surveyor reviewing a generated Bill of Quantities for quality. Score this BOQ and identify any issues.\n\nBOQ summary:\n${summary}\n\nFull BOQ (JSON):\n${JSON.stringify(boq, null, 2).slice(0, 8000)}`
+  );
+
+  return JSON.parse(result.response.text());
+}
+
+export async function generateBOQ(
+  sowText: string,
+  opts?: { suggestRates?: boolean }
+): Promise<BOQDocument> {
+  
+  void opts?.suggestRates; // reserved for future rate-suggestion pass
+  const structureRaw = await generateStructure(sowText, false);
+  let structure = normalizeStructure(structureRaw);
+
+  if (countNonHeaderItems(structure) === 0) {
+    const retryRaw = await generateStructure(sowText, true);
+    structure = normalizeStructure(retryRaw);
+  }
+
+  if (countNonHeaderItems(structure) === 0) {
+    throw new Error(
+      "Could not extract BOQ structure from SOW (no measurable items found). Please upload a clearer scope document."
+    );
+  }
+
+  const quantitiesRaw = await extractQuantities(sowText, structure);
+  return mergeStructureAndQuantities(structure, quantitiesRaw);
 }
 
 function mergeStructureAndQuantities(

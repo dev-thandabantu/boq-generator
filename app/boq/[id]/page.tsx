@@ -2,7 +2,9 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
-import type { BOQBill, BOQDocument, BOQItem, BOQQualitySummary } from "@/lib/types";
+
+import type { BOQBill, BOQDocument, BOQItem, BOQQualityScore, BOQQualitySummary } from "@/lib/types";
+import { usePostHog } from "posthog-js/react";
 
 interface DBBoq {
   id: string;
@@ -32,9 +34,12 @@ export default function BOQPage() {
   const { id } = useParams<{ id: string }>();
   const [boq, setBOQ] = useState<BOQDocument | null>(null);
   const [boqId] = useState(id);
+  const ph = usePostHog();
   const [exporting, setExporting] = useState(false);
   const [saved, setSaved] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [qa, setQA] = useState<BOQQualityScore | null>(null);
+  const [qaLoading, setQALoading] = useState(false);
   const [assistantInput, setAssistantInput] = useState("");
   const [assistantBusy, setAssistantBusy] = useState(false);
   const [assistantPaneOpen, setAssistantPaneOpen] = useState(true);
@@ -62,6 +67,17 @@ export default function BOQPage() {
       const { boq: row }: { boq: DBBoq } = await res.json();
       setBOQ(row.data);
       setLoading(false);
+
+      // Load QA score — use cached if present, otherwise fetch
+      if (row.data.qa) {
+        setQA(row.data.qa);
+      } else {
+        setQALoading(true);
+        fetch(`/api/boqs/${id}/qa`, { method: "POST" })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((json) => { if (json?.qa) setQA(json.qa); })
+          .finally(() => setQALoading(false));
+      }
     }
     load();
   }, [id, router]);
@@ -151,6 +167,11 @@ export default function BOQPage() {
       if (!proceed) return;
     }
 
+    ph.capture("excel_downloaded", {
+      boq_id: boqId,
+      bill_count: boq.bills.length,
+      item_count: boq.bills.reduce((s, b) => s + b.items.filter((i) => !i.is_header).length, 0),
+    });
     setExporting(true);
     try {
       const res = await fetch("/api/export", {
@@ -180,6 +201,7 @@ export default function BOQPage() {
     const instruction = assistantInput.trim();
     if (!instruction) return;
 
+    ph.capture("assistant_used", { boq_id: boqId });
     setAssistantInput("");
     setAssistantPreview(null);
     setAssistantMessages((prev) => [...prev, { role: "user", content: instruction }]);
@@ -367,6 +389,15 @@ export default function BOQPage() {
                   ZMW {grandTotal.toLocaleString("en-ZM", { minimumFractionDigits: 2 })}
                 </span>
               </span>
+            )}
+            {qaLoading && (
+              <span className="hidden sm:flex items-center gap-1.5 text-xs text-gray-600">
+                <span className="w-3 h-3 rounded-full border border-gray-600 border-t-transparent animate-spin inline-block" />
+                Scoring BOQ…
+              </span>
+            )}
+            {qa && !qaLoading && (
+              <QABadge qa={qa} />
             )}
             <button
               onClick={handleExport}
@@ -945,6 +976,48 @@ function ItemRow({
         </button>
       </td>
     </tr>
+  );
+}
+
+function QABadge({ qa }: { qa: import("@/lib/types").BOQQualityScore }) {
+  const [open, setOpen] = useState(false);
+  const gradeColour =
+    qa.grade === "Strong"
+      ? "text-green-400 border-green-500/30 bg-green-500/10"
+      : qa.grade === "Good"
+      ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
+      : qa.grade === "Fair"
+      ? "text-yellow-400 border-yellow-500/30 bg-yellow-500/10"
+      : "text-red-400 border-red-500/30 bg-red-500/10";
+
+  return (
+    <div className="relative hidden sm:block">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium ${gradeColour}`}
+      >
+        BOQ Quality: {qa.grade} · {qa.score}/10
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full mt-2 w-72 rounded-xl border border-white/10 bg-[#1a1a1a] p-4 shadow-xl z-30 space-y-2">
+          <p className="text-xs font-semibold text-white">{qa.summary}</p>
+          {qa.flags.length > 0 && (
+            <ul className="space-y-1 mt-2">
+              {qa.flags.map((flag, i) => (
+                <li key={i} className="flex items-start gap-2 text-xs text-yellow-300">
+                  <span className="mt-0.5 shrink-0">⚠</span>
+                  {flag}
+                </li>
+              ))}
+            </ul>
+          )}
+          {qa.flags.length === 0 && (
+            <p className="text-xs text-green-400">No issues found.</p>
+          )}
+          <button onClick={() => setOpen(false)} className="text-xs text-gray-600 hover:text-gray-400 pt-1">Dismiss</button>
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -3,11 +3,13 @@
 import { useEffect, useRef, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Progress } from "@/components/ui/progress";
+import { usePostHog } from "posthog-js/react";
 
 function GeneratingContent() {
   const router = useRouter();
   const params = useSearchParams();
   const sessionId = params.get("session_id");
+  const ph = usePostHog();
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState(10);
   const [statusText, setStatusText] = useState(
@@ -25,13 +27,15 @@ function GeneratingContent() {
         return;
       }
 
-      const text = sessionStorage.getItem("boq_text");
+      const text = localStorage.getItem("boq_text");
       if (!text) {
         setError(
           "Your PDF session expired. If you were charged, please contact us with your payment reference."
         );
         return;
       }
+
+      const suggestRates = localStorage.getItem("boq_suggest_rates") === "1";
 
       let progressTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -51,7 +55,7 @@ function GeneratingContent() {
         const res = await fetch("/api/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, session_id: sessionId }),
+          body: JSON.stringify({ text, session_id: sessionId, suggest_rates: suggestRates }),
         });
 
         setProgress(80);
@@ -70,7 +74,17 @@ function GeneratingContent() {
         const { boq, boq_id } = await res.json();
         setProgress(100);
 
-        sessionStorage.removeItem("boq_text");
+        ph.capture("boq_generated", {
+          boq_id,
+          bill_count: boq?.bills?.length ?? 0,
+          item_count: (boq?.bills ?? []).reduce(
+            (s: number, b: { items?: unknown[] }) => s + (b.items?.length ?? 0), 0
+          ),
+          suggest_rates: suggestRates,
+        });
+
+        localStorage.removeItem("boq_text");
+        localStorage.removeItem("boq_suggest_rates");
 
         if (boq_id) {
           router.push(`/boq/${boq_id}`);

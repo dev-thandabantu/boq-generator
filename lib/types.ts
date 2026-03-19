@@ -20,15 +20,24 @@ export interface BOQBill {
   items: BOQItem[];
 }
 
+export interface BOQQualityScore {
+  score: number;
+  grade: "Strong" | "Good" | "Fair" | "Weak";
+  summary: string;
+  flags: string[];
+}
+
 export interface BOQDocument {
   project: string;
   location: string;
   prepared_by: string;
   date: string;
   bills: BOQBill[];
+  
   pipeline_version?: string;
   quality_summary?: BOQQualitySummary;
   artifacts?: BOQArtifacts;
+  qa?: BOQQualityScore;
 }
 
 export interface BOQValidationFlag {
