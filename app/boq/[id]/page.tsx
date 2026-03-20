@@ -11,6 +11,7 @@ interface DBBoq {
   id: string;
   title: string;
   data: BOQDocument;
+  source_excel_key?: string | null;
 }
 
 interface AssistantMessage {
@@ -37,6 +38,9 @@ export default function BOQPage() {
   const [boqId] = useState(id);
   const ph = usePostHog();
   const [exporting, setExporting] = useState(false);
+  const [exportingPatched, setExportingPatched] = useState(false);
+  const [hasSourceExcel, setHasSourceExcel] = useState(false);
+  const [exportDropdownOpen, setExportDropdownOpen] = useState(false);
   const [saved, setSaved] = useState(true);
   const [loading, setLoading] = useState(true);
   const [qa, setQA] = useState<BOQQualityScore | null>(null);
@@ -67,6 +71,7 @@ export default function BOQPage() {
       }
       const { boq: row }: { boq: DBBoq } = await res.json();
       setBOQ(row.data);
+      setHasSourceExcel(Boolean(row.source_excel_key));
       setQA(row.data.qa ?? computeDeterministicQA(row.data));
       setLoading(false);
 
@@ -197,6 +202,28 @@ export default function BOQPage() {
       console.error(e);
     } finally {
       setExporting(false);
+      setExportDropdownOpen(false);
+    }
+  }
+
+  async function handleExportPatched() {
+    setExportingPatched(true);
+    setExportDropdownOpen(false);
+    try {
+      const res = await fetch(`/api/export-patched/${boqId}`);
+      if (!res.ok) throw new Error("Export failed");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Rated_${boq?.project?.replace(/[^\w]/g, "_").slice(0, 40) ?? "BOQ"}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert("Export failed. Please try again.");
+      console.error(e);
+    } finally {
+      setExportingPatched(false);
     }
   }
 
@@ -402,13 +429,47 @@ export default function BOQPage() {
               </span>
             )}
             {qa && <QABadge qa={qa} />}
-            <button
-              onClick={handleExport}
-              disabled={exporting}
-              className="px-4 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-black text-sm font-semibold transition-colors disabled:opacity-60"
-            >
-              {exporting ? "Exporting…" : "Download Excel"}
-            </button>
+            {hasSourceExcel ? (
+              <div className="relative">
+                <button
+                  onClick={() => setExportDropdownOpen((v) => !v)}
+                  disabled={exporting || exportingPatched}
+                  className="px-4 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-black text-sm font-semibold transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
+                >
+                  {exporting || exportingPatched ? "Exporting…" : "Download Excel"}
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                  </svg>
+                </button>
+                {exportDropdownOpen && (
+                  <div className="absolute right-0 top-full mt-1 w-64 rounded-lg border border-white/10 bg-[#1a1a1a] shadow-xl z-50">
+                    <button
+                      onClick={handleExportPatched}
+                      className="w-full px-4 py-3 text-left text-sm text-white hover:bg-white/5 rounded-t-lg"
+                    >
+                      <p className="font-medium">Download original with rates</p>
+                      <p className="text-xs text-gray-400 mt-0.5">Your uploaded Excel file, with rates filled in</p>
+                    </button>
+                    <div className="border-t border-white/5" />
+                    <button
+                      onClick={handleExport}
+                      className="w-full px-4 py-3 text-left text-sm text-white hover:bg-white/5 rounded-b-lg"
+                    >
+                      <p className="font-medium">Download formatted BOQ</p>
+                      <p className="text-xs text-gray-400 mt-0.5">Fresh export in our house style (ZMW)</p>
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <button
+                onClick={handleExport}
+                disabled={exporting}
+                className="px-4 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-black text-sm font-semibold transition-colors disabled:opacity-60"
+              >
+                {exporting ? "Exporting…" : "Download Excel"}
+              </button>
+            )}
             <button
               onClick={() => setAssistantPaneOpen((v) => !v)}
               className="hidden xl:inline-flex px-3 py-2 rounded-lg bg-white/10 hover:bg-white/15 text-gray-100 text-sm"

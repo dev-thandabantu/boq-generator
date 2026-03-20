@@ -1,8 +1,8 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { BOQDocument } from "./types";
 
-const PRIMARY_MODEL = process.env.GEMINI_MODEL_PRIMARY || "gemini-2.5-flash";
-const FALLBACK_MODEL = process.env.GEMINI_MODEL_FALLBACK || PRIMARY_MODEL;
+const PRIMARY_MODEL = process.env.GEMINI_MODEL_PRIMARY || "gemini-2.5-pro";
+const FALLBACK_MODEL = process.env.GEMINI_MODEL_FALLBACK || "gemini-2.5-flash";
 const MAX_ATTEMPTS_PER_MODEL = 2;
 
 function getGenAI() {
@@ -64,10 +64,12 @@ async function runAssistantModel(
   const model = getGenAI().getGenerativeModel({
     model: modelName,
     systemInstruction: SYSTEM_PROMPT,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     generationConfig: {
       responseMimeType: "application/json",
       temperature: 0.1,
-    },
+      thinkingConfig: { thinkingBudget: -1 },
+    } as any,
   });
 
   const result = await model.generateContent(

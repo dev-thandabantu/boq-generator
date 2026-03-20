@@ -468,3 +468,99 @@ function computeAmount(item: BOQItem): number | null {
   if (item.qty !== null && item.rate !== null) return item.qty * item.rate;
   return null;
 }
+
+/**
+ * Converts an uploaded Excel file buffer to a CSV-like text representation
+ * suitable for sending to Gemini for parsing/validation.
+ */
+export function excelToCSV(buffer: Buffer): string {
+  const wb = XLSX.read(buffer, { type: "buffer" });
+  const sheetName = wb.SheetNames[0];
+  if (!sheetName) return "";
+  const ws = wb.Sheets[sheetName];
+  return XLSX.utils.sheet_to_csv(ws, { blankrows: false });
+}
+
+/**
+ * Patches an original Excel file buffer by filling in rate and amount columns
+ * using values from a BOQDocument.
+ *
+ * @param originalBuffer - The original Excel file as a Buffer
+ * @param boq - The BOQDocument containing rate and amount values
+ * @param rateColumnHeader - Exact header text of the Rate column (from validateBOQ)
+ * @param amountColumnHeader - Exact header text of the Amount column (from validateBOQ)
+ */
+export function patchExcelWithRates(
+  originalBuffer: Buffer,
+  boq: BOQDocument,
+  rateColumnHeader: string,
+  amountColumnHeader: string
+): Buffer {
+  const wb = XLSX.read(originalBuffer, { type: "buffer" });
+  const sheetName = wb.SheetNames[0];
+  if (!sheetName) return originalBuffer;
+
+  const ws = wb.Sheets[sheetName];
+  const range = XLSX.utils.decode_range(ws["!ref"] ?? "A1");
+
+  // Find the header row and column indices for Rate and Amount
+  let headerRow = -1;
+  let rateCol = -1;
+  let amountCol = -1;
+
+  const rateHeaderNorm = rateColumnHeader.trim().toLowerCase();
+  const amountHeaderNorm = amountColumnHeader.trim().toLowerCase();
+
+  // Scan first 10 rows for headers
+  for (let r = range.s.r; r <= Math.min(range.e.r, range.s.r + 9); r++) {
+    let foundRate = false;
+    let foundAmount = false;
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const cellRef = XLSX.utils.encode_cell({ r, c });
+      const cellVal = ws[cellRef];
+      if (!cellVal) continue;
+      const text = String(cellVal.v ?? "").trim().toLowerCase();
+      if (text === rateHeaderNorm) { rateCol = c; foundRate = true; }
+      if (text === amountHeaderNorm) { amountCol = c; foundAmount = true; }
+    }
+    if (foundRate || foundAmount) { headerRow = r; break; }
+  }
+
+  if (headerRow === -1 || (rateCol === -1 && amountCol === -1)) {
+    // Can't locate columns — return original unchanged
+    return originalBuffer;
+  }
+
+  // Collect all non-header BOQ items in order
+  const allItems = boq.bills.flatMap((bill) =>
+    bill.items.filter((item) => !item.is_header)
+  );
+
+  // Walk data rows and fill rates/amounts by sequential position
+  let itemIndex = 0;
+  for (let r = headerRow + 1; r <= range.e.r && itemIndex < allItems.length; r++) {
+    // Check if this row has any content (skip fully blank rows)
+    let hasContent = false;
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const ref = XLSX.utils.encode_cell({ r, c });
+      if (ws[ref]?.v != null && String(ws[ref].v).trim() !== "") { hasContent = true; break; }
+    }
+    if (!hasContent) continue;
+
+    const item = allItems[itemIndex];
+    itemIndex++;
+
+    if (item.is_header) continue;
+
+    if (rateCol !== -1 && item.rate !== null) {
+      const rateRef = XLSX.utils.encode_cell({ r, c: rateCol });
+      ws[rateRef] = { v: item.rate, t: "n", z: "#,##0.00" };
+    }
+    if (amountCol !== -1 && item.amount !== null) {
+      const amountRef = XLSX.utils.encode_cell({ r, c: amountCol });
+      ws[amountRef] = { v: item.amount, t: "n", z: "#,##0.00" };
+    }
+  }
+
+  return XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+}
