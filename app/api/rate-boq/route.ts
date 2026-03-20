@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { getStripe } from "@/lib/stripe";
-import { fillBOQRates } from "@/lib/claude";
+import { fillBOQRates, RateContext } from "@/lib/claude";
 import { excelToCSV } from "@/lib/excel";
 
 export const runtime = "nodejs";
@@ -25,7 +25,10 @@ function classifyError(message: string): { status: number; safeMessage: string }
 
 export async function POST(req: NextRequest) {
   try {
-    const { session_id } = (await req.json()) as { session_id: string };
+    const { session_id, rate_context } = (await req.json()) as {
+      session_id: string;
+      rate_context?: RateContext;
+    };
 
     if (!session_id) {
       return NextResponse.json({ error: "Payment required" }, { status: 402 });
@@ -89,7 +92,7 @@ export async function POST(req: NextRequest) {
     const csvText = excelToCSV(buffer);
 
     const truncated = csvText.length > 60000 ? csvText.slice(0, 60000) + "\n...[truncated]" : csvText;
-    const boq = await fillBOQRates(truncated);
+    const boq = await fillBOQRates(truncated, rate_context);
 
     const title = boq.project || "Rated BOQ";
 
