@@ -3,6 +3,8 @@ import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { getStripe } from "@/lib/stripe";
 import { fillBOQRates, RateContext } from "@/lib/claude";
 import { excelToCSV } from "@/lib/excel";
+import { logger } from "@/lib/logger";
+import { trackEvent } from "@/lib/analytics";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -79,7 +81,7 @@ export async function POST(req: NextRequest) {
       .download(storageKey);
 
     if (downloadError || !fileData) {
-      console.error("Storage download error:", downloadError);
+      logger.error("Storage download error", { error: String(downloadError), route: "rate-boq" });
       return NextResponse.json(
         { error: "Could not retrieve your uploaded file. Please try again." },
         { status: 500 }
@@ -112,7 +114,7 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (dbError) {
-      console.error("Failed to save rated BOQ:", dbError);
+      logger.error("Failed to save rated BOQ", { error: String(dbError), route: "rate-boq" });
       return NextResponse.json({ boq, boq_id: null });
     }
 
@@ -130,9 +132,11 @@ export async function POST(req: NextRequest) {
       { onConflict: "stripe_session_id", ignoreDuplicates: false }
     );
 
+    const itemCount = boq.bills?.flatMap((b) => b.items).filter((i) => !i.is_header).length ?? 0;
+    trackEvent(user.id, "boq_rated", { boqId: saved.id, itemCount, storageKey });
     return NextResponse.json({ boq, boq_id: saved.id });
   } catch (err) {
-    console.error("rate-boq error:", err);
+    logger.error("rate-boq error", { error: err instanceof Error ? err.message : String(err), route: "rate-boq" });
     const message = err instanceof Error ? err.message : "Unknown error";
     const classified = classifyError(message);
     return NextResponse.json({ error: classified.safeMessage }, { status: classified.status });

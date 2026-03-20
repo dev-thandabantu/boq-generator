@@ -1,16 +1,19 @@
 # BOQ Generator
 
-AI-powered Bill of Quantities generator for construction projects in Southern Africa (Zambian context). Upload a Scope of Work PDF, pay once, and receive a fully structured, editable BOQ you can export to Excel.
+AI-powered Bill of Quantities generator for construction projects in Southern Africa (Zambian context). Upload a Scope of Work PDF or rate an existing BOQ Excel — pay once and receive a fully structured, editable BOQ you can export to Excel.
 
 ## Features
 
-- **PDF upload & text extraction** — drag-and-drop a Scope of Work document
-- **AI-generated BOQ** — Gemini 2.5 Flash extracts line items, quantities, units, and groups them into standard trade bills
-- **Stripe payment gate** — $100 per generation; no account needed to pay
+- **PDF/DOCX upload & extraction** — drag-and-drop a Scope of Work document
+- **AI-generated BOQ** — Gemini 2.5 Pro extracts line items, quantities, units, and groups them into standard trade bills
+- **Rate an existing BOQ** — upload an unrated Excel BOQ; AI fills in Zambian market rates calibrated to province, site accessibility, labour source, and margin
+- **Stripe payment gate** — $100 per generation or rating; no account needed to pay
 - **Google OAuth auth** — sign in to save and revisit past BOQs
-- **BOQ editor** — edit rates in-browser; amounts auto-calculate; changes auto-save to the database
-- **Excel export** — download a formatted `.xlsx` file ready for tendering
+- **BOQ editor** — edit rates in-browser; amounts auto-calculate; changes auto-save
+- **AI edit assistant** — natural-language instructions to add/remove/edit BOQ items via streaming assistant
+- **Excel export** — download a formatted `.xlsx` in Zambian tender format, or patch your original Excel file with rates added in-place
 - **Dashboard** — view and reopen all previously generated BOQs
+- **Health check** — `GET /api/health` returns DB connectivity status (for uptime monitors)
 
 ## Tech Stack
 
@@ -19,20 +22,26 @@ AI-powered Bill of Quantities generator for construction projects in Southern Af
 | Framework | Next.js 15 (App Router) |
 | Language | TypeScript |
 | Auth + DB | Supabase (Postgres + Row Level Security) |
-| AI | Google Gemini 2.5 Flash |
+| AI | Google Gemini 2.5 Pro (primary) / 2.5 Flash (fallback) |
 | Payments | Stripe Checkout |
 | Deployment | Vercel |
 | Styling | Tailwind CSS |
-| Excel | ExcelJS |
+| Excel | xlsx (SheetJS) |
+| Error tracking | Sentry (`@sentry/nextjs`) |
+| Analytics | PostHog (client + server-side events) |
+| Rate limiting | Upstash Redis (`@upstash/ratelimit`) |
 
-## User Flow
+## User Flows
 
 ```
-Upload PDF → Pay $100 (Stripe) → /generating (AI processing) → BOQ Editor → Export Excel
-                                                                     ↓
-                                                              Saved to Supabase
-                                                                     ↓
-                                                           Accessible from Dashboard
+── Generate from SoW ──────────────────────────────────────────────────────────
+Upload PDF/DOCX → Extract text → Pay $100 (Stripe) → /generating (AI) → BOQ Editor → Export Excel
+                                                                              ↓
+                                                                       Saved to Supabase
+
+── Rate an existing BOQ ───────────────────────────────────────────────────────
+Upload Excel BOQ → Validate structure → Answer 5 context questions → Pay $100 (Stripe)
+  → /generating (AI fills rates) → BOQ Editor → Export patched Excel or formatted BOQ
 ```
 
 ---
@@ -69,19 +78,36 @@ GEMINI_API_KEY=<your-google-ai-key>
 
 # App URL (no trailing slash)
 NEXT_PUBLIC_APP_URL=https://your-app.vercel.app   # or http://localhost:3000 locally
+
+# PostHog analytics
+NEXT_PUBLIC_POSTHOG_KEY=phc_...
+NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com
+
+# Sentry error tracking
+SENTRY_DSN=https://...@....ingest.sentry.io/...
+NEXT_PUBLIC_SENTRY_DSN=<same value as SENTRY_DSN>
+
+# Upstash Redis (rate limiting — optional in local dev, required in production)
+UPSTASH_REDIS_REST_URL=https://<name>.upstash.io
+UPSTASH_REDIS_REST_TOKEN=<token>
 ```
 
-### 3. Run database migrations
+> **Local dev:** Upstash vars are optional — rate limiting gracefully skips when they are absent. Sentry and PostHog server events are suppressed when `NODE_ENV !== "production"`.
 
-The schema is in `supabase/migrations/001_initial.sql`. Run it **once** in your Supabase project:
+### 3. Database migrations
 
-1. Open [Supabase Dashboard](https://supabase.com/dashboard) → your project → **SQL Editor**
-2. Paste the full contents of `supabase/migrations/001_initial.sql`
-3. Click **Run**
+Migrations live in `supabase/migrations/` and run automatically:
 
-This creates the `profiles`, `boqs`, and `payments` tables with Row Level Security policies. The SQL is idempotent — safe to re-run.
+- **Production** — a GitHub Actions workflow (`.github/workflows/migrate.yml`) runs all `*.sql` files in sorted order on every push to `master`.
+- **Local dev** — migrations run at Next.js cold-start via `instrumentation.ts` → `lib/db/migrate.ts`.
 
-> **Why manual?** Vercel serverless functions can't reliably run DDL migrations at cold-start. Running the SQL directly in Supabase is the most reliable approach.
+If you need to run them manually:
+
+```bash
+psql "$DATABASE_URL" -f supabase/migrations/001_initial.sql
+psql "$DATABASE_URL" -f supabase/migrations/002_excel_rate_ingestion.sql
+psql "$DATABASE_URL" -f supabase/migrations/003_indexes.sql
+```
 
 ### 4. Configure Supabase Auth
 
@@ -118,10 +144,9 @@ The CLI will print a `whsec_...` secret — use that as `STRIPE_WEBHOOK_SECRET` 
 ## Deploying to Vercel
 
 1. Push to GitHub and import the repo in [Vercel](https://vercel.com/new)
-2. Add all environment variables from `.env.local` to Vercel → **Settings → Environment Variables**
-3. Set `NEXT_PUBLIC_APP_URL` to your actual Vercel URL (e.g. `https://boq-generator-ten.vercel.app`)
-4. Deploy
-5. **Run the SQL migration** in Supabase (Step 3 above) — required before the app can store any data
+2. Add all environment variables to Vercel → **Settings → Environment Variables**
+3. Set `NEXT_PUBLIC_APP_URL` to your actual Vercel URL
+4. Deploy — migrations run automatically on first cold-start
 
 ### Stripe webhook (production)
 
@@ -130,44 +155,80 @@ The CLI will print a `whsec_...` secret — use that as `STRIPE_WEBHOOK_SECRET` 
 3. Events to listen for: `checkout.session.completed`
 4. Copy the signing secret (`whsec_...`) into Vercel env as `STRIPE_WEBHOOK_SECRET`
 
+### Storage bucket
+
+The app uses a Supabase Storage bucket named `boq-generator-dev` to store uploaded Excel files before rate filling. Create it in Supabase → **Storage** with private access (RLS handled by the service role key).
+
 ---
 
 ## Project structure
 
 ```
 app/
-  page.tsx              # Upload / pricing page
-  login/page.tsx        # Google sign-in
-  generating/page.tsx   # Progress screen while AI runs
-  boq/[id]/page.tsx     # BOQ editor (loads from DB)
-  dashboard/page.tsx    # List of past BOQs
-  auth/callback/        # Supabase OAuth callback handler
+  page.tsx                  # Landing page
+  upload/page.tsx           # Upload / pricing page (Generate + Rate tabs)
+  login/page.tsx            # Google sign-in
+  generating/page.tsx       # Progress screen while AI runs
+  boq/[id]/page.tsx         # BOQ editor (loads from DB)
+  dashboard/page.tsx        # List of past BOQs
+  error.tsx                 # App-level error boundary (reports to Sentry)
+  not-found.tsx             # Styled 404 page
+  global-error.tsx          # Root HTML error boundary
+  auth/callback/            # Supabase OAuth callback handler
   api/
-    extract/            # PDF → text extraction
-    checkout/           # Create Stripe Checkout session
-    generate/           # Gemini BOQ generation + save to DB
-    boqs/               # GET list, GET by id, PUT (auto-save), AI edit assistant (stream + preview)
-    export/             # Excel export
-    webhooks/stripe/    # Stripe payment confirmation
+    extract/                # PDF/DOCX → text extraction + SOW detection
+    checkout/               # Create Stripe Checkout session
+    generate/               # Gemini BOQ generation + save to DB
+    rate-boq/               # Gemini rate filling for uploaded Excel BOQs
+    ingest-boq/             # Validate + upload Excel BOQ to Storage
+    boqs/                   # GET list, GET by id, PUT (auto-save)
+    boqs/[id]/assistant/    # AI edit assistant (streaming + preview modes)
+    export/                 # Excel export (formatted or patched original)
+    health/                 # GET /api/health — DB connectivity check
+    webhooks/stripe/        # Stripe payment confirmation
 
 lib/
-  claude.ts             # Gemini API wrapper (generateBOQ)
-  boq-assistant.ts      # Gemini wrapper for BOQ-only edit instructions
-  db/                   # Supabase client helpers + migrate.ts
-  stripe.ts             # Lazy Stripe client
-  types.ts              # Shared TypeScript types
+  claude.ts                 # Gemini API wrapper (generateBOQ, fillBOQRates)
+  boq-assistant.ts          # Gemini wrapper for BOQ edit instructions
+  excel.ts                  # Excel parsing, CSV conversion, patchExcelWithRates
+  logger.ts                 # Zero-dependency structured JSON logger
+  analytics.ts              # PostHog server-side event tracking (production only)
+  config.ts                 # Startup env var validation
+  db/                       # Supabase client helpers + migrate.ts
+  stripe.ts                 # Lazy Stripe client
+  types.ts                  # Shared TypeScript types
 
 supabase/
   migrations/
-    001_initial.sql     # Full schema (profiles, boqs, payments)
+    001_initial.sql         # Schema: profiles, boqs, payments + RLS
+    002_excel_rate_ingestion.sql  # source_excel_key, rate/amount col headers
+    003_indexes.sql         # Performance indexes
+
+proxy.ts                    # Next.js middleware: auth guard + IP rate limiting
+instrumentation.ts          # Server init: Sentry + DB migrations
+instrumentation-client.ts   # Browser Sentry init + Session Replay
+sentry.server.config.ts     # Node runtime Sentry config
+sentry.edge.config.ts       # Edge runtime Sentry config
 ```
+
+## Observability
+
+| Tool | What it covers |
+|---|---|
+| **Sentry** | Unhandled server errors, React error boundaries, edge errors, Session Replay |
+| **PostHog** | `boq_generated`, `boq_rated`, `excel_ingested`, `payment_completed` server events + client-side page views |
+| **Structured logs** | All API routes emit JSON logs (`lib/logger.ts`) — visible in Vercel log drain |
+| **Health check** | `GET /api/health` — returns `{ status, timestamp, db }` for uptime monitors |
+| **Rate limiting** | Upstash Redis sliding window: 10 requests / 15 min per IP on AI routes |
 
 ## Common issues
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Internal Server Error` on any page | Tables don't exist in Supabase | Run `001_initial.sql` in Supabase SQL Editor |
-| Auth redirect loop | Supabase redirect URLs not configured | Add `/auth/callback` URL in Supabase Auth settings |
-| Stripe checkout fails | `STRIPE_SECRET_KEY` is a placeholder | Add real key in Vercel env vars |
-| BOQ generation fails | `GEMINI_API_KEY` is missing or invalid | Add real Gemini API key in Vercel env vars |
-| `NEXT_PUBLIC_APP_URL` mismatch | Wrong app URL set | Update to exact Vercel deployment URL |
+| Tables don't exist | Migration hasn't run | Check GitHub Actions → migrate job, or run SQL files manually |
+| Auth redirect loop | Supabase redirect URLs not configured | Add `/auth/callback` to Supabase Auth settings |
+| Stripe checkout fails | `STRIPE_SECRET_KEY` is missing | Add real key in Vercel env vars |
+| BOQ generation fails | `GEMINI_API_KEY` missing or invalid | Add real Gemini API key in Vercel env vars |
+| Rate filling misaligns | Excel BOQ has unusual structure | Check that the rate column header is detected correctly in the `/api/ingest-boq` response |
+| 429 on AI routes | Upstash rate limit hit | Wait 15 minutes, or increase limit in `proxy.ts` |
+| Sentry not receiving | DSN not set in Vercel | Add `SENTRY_DSN` + `NEXT_PUBLIC_SENTRY_DSN` to Vercel env vars |
