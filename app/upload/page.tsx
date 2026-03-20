@@ -16,6 +16,7 @@ export default function UploadPage() {
   const [dragging, setDragging] = useState(false);
   const [suggestRates, setSuggestRates] = useState(false);
   const [sowWarning, setSowWarning] = useState<string | null>(null);
+  const [isSOW, setIsSOW] = useState<boolean | null>(null);
   const ph = usePostHog();
 
   function handleFile(f: File) {
@@ -29,6 +30,7 @@ export default function UploadPage() {
     setError(null);
     setPages(null);
     setSowWarning(null);
+    setIsSOW(null);
   }
 
   async function handleExtract() {
@@ -45,17 +47,35 @@ export default function UploadPage() {
         const { error: e } = await res.json();
         throw new Error(e || "Extraction failed");
       }
-      const { text, pages: p, isSOW, sowWarning: warning } = await res.json();
+      const {
+        text,
+        pages: p,
+        isSOW: isSOWResult,
+        sowWarning: warning,
+        sowConfidence,
+        documentType,
+        sowFlags,
+      } = await res.json();
       localStorage.setItem("boq_text", text);
+      localStorage.setItem("boq_is_sow", isSOWResult ? "1" : "0");
+      localStorage.setItem("boq_sow_warning", warning || "");
+      localStorage.setItem("boq_sow_confidence", sowConfidence ? String(sowConfidence) : "");
+      localStorage.setItem("boq_document_type", documentType || "");
+      localStorage.setItem("boq_sow_flags", JSON.stringify(sowFlags || []));
       setPages(p);
+      setIsSOW(isSOWResult);
       ph.capture("document_uploaded", {
         file_type: file.name.toLowerCase().endsWith(".pdf") ? "pdf" : "docx",
         pages: p,
-        is_sow: isSOW,
+        is_sow: isSOWResult,
       });
-      if (!isSOW && warning) {
+      if (!isSOWResult && warning) {
         setSowWarning(warning);
-        ph.capture("sow_warning_shown", { reason: warning });
+        ph.capture("sow_warning_shown", {
+          reason: warning,
+          document_type: documentType,
+          confidence: sowConfidence,
+        });
       }
       setStage("ready");
     } catch (err) {
@@ -67,6 +87,10 @@ export default function UploadPage() {
 
   async function handleCheckout() {
     if (!file) return;
+    if (isSOW === false) {
+      setError("This document does not appear to be a construction Scope of Work suitable for BOQ generation.");
+      return;
+    }
     localStorage.setItem("boq_suggest_rates", suggestRates ? "1" : "0");
     ph.capture("payment_initiated", { suggest_rates: suggestRates });
     setStage("paying");
@@ -138,7 +162,7 @@ export default function UploadPage() {
                 </svg>
                 <div>
                   <p className="text-xs text-yellow-300 font-medium">Document may not be a Scope of Work</p>
-                  <p className="text-xs text-yellow-400/80 mt-0.5">{sowWarning} You can still proceed, but the BOQ quality may be poor.</p>
+                  <p className="text-xs text-yellow-200/90 mt-0.5">{sowWarning} Please upload a construction SOW, BOQ, or engineering specification instead.</p>
                 </div>
               </div>
             )}
@@ -151,7 +175,13 @@ export default function UploadPage() {
               <p className="text-sm text-white truncate flex-1">{file?.name}</p>
               <button
                 className="text-xs text-gray-500 hover:text-gray-300 shrink-0"
-                onClick={() => { setFile(null); setStage("idle"); setPages(null); setSowWarning(null); }}
+                onClick={() => {
+                  setFile(null);
+                  setStage("idle");
+                  setPages(null);
+                  setSowWarning(null);
+                  setIsSOW(null);
+                }}
               >
                 Change
               </button>
@@ -211,13 +241,15 @@ export default function UploadPage() {
             <button
               className="w-full py-3.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-black font-semibold text-sm transition-colors disabled:opacity-70 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
               onClick={handleCheckout}
-              disabled={stage === "paying"}
+              disabled={stage === "paying" || isSOW === false}
             >
               {stage === "paying" ? (
                 <>
                   <span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-black/60 border-t-transparent animate-spin" />
                   Opening secure checkout...
                 </>
+              ) : isSOW === false ? (
+                "Upload a construction SOW to continue"
               ) : (
                 "Pay $100 & Generate BOQ →"
               )}

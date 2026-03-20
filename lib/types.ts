@@ -25,6 +25,8 @@ export interface BOQQualityScore {
   grade: "Strong" | "Good" | "Fair" | "Weak";
   summary: string;
   flags: string[];
+  source?: "deterministic" | "hybrid";
+  updated_at?: string;
 }
 
 export interface BOQDocument {

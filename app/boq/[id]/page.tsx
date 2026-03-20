@@ -5,6 +5,7 @@ import { useRouter, useParams } from "next/navigation";
 
 import type { BOQBill, BOQDocument, BOQItem, BOQQualityScore, BOQQualitySummary } from "@/lib/types";
 import { usePostHog } from "posthog-js/react";
+import { computeDeterministicQA } from "@/lib/boq-qa";
 
 interface DBBoq {
   id: string;
@@ -66,6 +67,7 @@ export default function BOQPage() {
       }
       const { boq: row }: { boq: DBBoq } = await res.json();
       setBOQ(row.data);
+      setQA(row.data.qa ?? computeDeterministicQA(row.data));
       setLoading(false);
 
       // Load QA score — use cached if present, otherwise fetch
@@ -75,7 +77,9 @@ export default function BOQPage() {
         setQALoading(true);
         fetch(`/api/boqs/${id}/qa`, { method: "POST" })
           .then((r) => (r.ok ? r.json() : null))
-          .then((json) => { if (json?.qa) setQA(json.qa); })
+          .then((json) => {
+            if (json?.qa) setQA(json.qa);
+          })
           .finally(() => setQALoading(false));
       }
     }
@@ -100,6 +104,7 @@ export default function BOQPage() {
   const updateBOQ = useCallback(
     (updated: BOQDocument) => {
       setBOQ(updated);
+      setQA(computeDeterministicQA(updated));
       setSaved(false);
       saveToDB(updated);
     },
@@ -396,9 +401,7 @@ export default function BOQPage() {
                 Scoring BOQ…
               </span>
             )}
-            {qa && !qaLoading && (
-              <QABadge qa={qa} />
-            )}
+            {qa && <QABadge qa={qa} />}
             <button
               onClick={handleExport}
               disabled={exporting}

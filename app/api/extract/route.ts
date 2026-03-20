@@ -69,9 +69,15 @@ export async function POST(req: NextRequest) {
     // Quick SOW validation (uses first ~3 000 chars for speed)
     let isSOW = true;
     let sowWarning: string | null = null;
+    let sowConfidence: number | null = null;
+    let documentType: string | null = null;
+    let sowFlags: string[] = [];
     try {
       const validation = await validateSOW(text);
       isSOW = validation.isSOW;
+      sowConfidence = validation.confidence;
+      documentType = validation.documentType;
+      sowFlags = validation.flags ?? [];
       if (!isSOW) {
         sowWarning = validation.reason;
       }
@@ -79,7 +85,15 @@ export async function POST(req: NextRequest) {
       // Non-fatal — proceed without validation result
     }
 
-    return NextResponse.json({ text, pages, isSOW, sowWarning });
+    return NextResponse.json({
+      text,
+      pages,
+      isSOW,
+      sowWarning,
+      sowConfidence,
+      documentType,
+      sowFlags,
+    });
   } catch (err) {
     console.error("Extraction error:", err);
     return NextResponse.json(

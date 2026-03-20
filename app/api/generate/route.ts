@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { generateBOQ } from "@/lib/claude";
+import { generateBOQ, validateSOW } from "@/lib/claude";
 import { getStripe } from "@/lib/stripe";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 
@@ -45,6 +45,9 @@ export async function POST(req: NextRequest) {
       text: string;
       session_id: string;
       suggest_rates?: boolean;
+      is_sow?: boolean;
+      sow_warning?: string;
+      document_type?: string;
     };
 
     if (!text || typeof text !== "string") {
@@ -60,6 +63,22 @@ export async function POST(req: NextRequest) {
 
     if (!session_id) {
       return NextResponse.json({ error: "Payment required" }, { status: 402 });
+    }
+
+    const validation = await validateSOW(text);
+    const clientSaysNotSOW = body.is_sow === false;
+    if (!validation.isSOW || clientSaysNotSOW) {
+      const reason =
+        validation.reason ||
+        body.sow_warning ||
+        "This document does not appear to be a construction Scope of Work suitable for BOQ generation.";
+      return NextResponse.json(
+        {
+          error: reason,
+          document_type: validation.documentType || body.document_type || "unknown",
+        },
+        { status: 422 }
+      );
     }
 
     // Verify payment
