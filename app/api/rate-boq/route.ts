@@ -5,7 +5,7 @@ import { fillBOQRates, RateContext } from "@/lib/claude";
 import { excelToCSV } from "@/lib/excel";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 const STORAGE_BUCKET = "boq-generator-dev";
 

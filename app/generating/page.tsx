@@ -92,13 +92,19 @@ function GeneratingContent() {
         setProgress(80);
 
         if (!res.ok) {
-          const { error: e } = await res.json();
+          let e: string | undefined;
+          try {
+            const body = await res.json();
+            e = body.error;
+          } catch { /* non-JSON error body (e.g. Vercel timeout HTML) */ }
           if (res.status === 402)
             throw new Error("Payment could not be verified. Please contact support.");
           if (res.status === 429)
             throw new Error("AI quota exceeded. Please try again in a minute.");
           if (res.status === 503)
             throw new Error("AI service is temporarily busy. Please wait a moment and try again.");
+          if (res.status === 504 || !e)
+            throw new Error("The request timed out. Your BOQ may be large — please try again.");
           throw new Error(e || (isRateBoq ? "Rate filling failed" : "BOQ generation failed"));
         }
 

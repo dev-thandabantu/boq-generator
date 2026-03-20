@@ -228,12 +228,15 @@ async function generateStructuredContent<T>({
   systemInstruction,
   temperature,
   preferredModel,
+  thinkingBudget = -1,
 }: {
   prompt: string;
   responseSchema: object;
   systemInstruction?: string;
   temperature: number;
   preferredModel?: string;
+  /** Gemini thinking token budget. -1 = dynamic (default). 0 = disabled. */
+  thinkingBudget?: number;
 }): Promise<T> {
   const candidates = Array.from(
     new Set([preferredModel, ...MODEL_CANDIDATES].filter(Boolean))
@@ -250,7 +253,7 @@ async function generateStructuredContent<T>({
           responseMimeType: "application/json",
           responseSchema: responseSchema as any,
           temperature,
-          thinkingConfig: { thinkingBudget: -1 },
+          thinkingConfig: { thinkingBudget },
         } as any,
       });
       const result = await model.generateContent(prompt);
@@ -1070,9 +1073,10 @@ export async function fillBOQRates(csvText: string, rateContext?: RateContext): 
   const truncated = csvText.length > 60000 ? csvText.slice(0, 60000) + "\n...[truncated]" : csvText;
 
   const raw = await generateStructuredContent<BOQDocument>({
-    preferredModel: PRIMARY_MODEL,
+    preferredModel: FALLBACK_MODEL,
     responseSchema: BOQ_DOCUMENT_SCHEMA,
     temperature: 0.1,
+    thinkingBudget: 8000,
     systemInstruction: `You are a senior quantity surveyor parsing an Excel Bill of Quantities and filling missing rates.
 
 ${RATES_INSTRUCTION}${contextBlock}
