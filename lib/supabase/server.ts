@@ -26,18 +26,21 @@ export async function createClient() {
 /** Bypasses RLS — use only in server-side API routes */
 export function createServiceClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (!url) {
-    throw new Error("NEXT_PUBLIC_SUPABASE_URL is not configured");
-  }
-  if (!serviceKey) {
-    throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
+  if (!url || !serviceRoleKey) {
+    const missing = [
+      !url ? "NEXT_PUBLIC_SUPABASE_URL" : null,
+      !serviceRoleKey ? "SUPABASE_SERVICE_ROLE_KEY" : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
+    throw new Error(`Missing required Supabase env var(s): ${missing}`);
   }
 
   return createServerClient(
     url,
-    serviceKey,
+    serviceRoleKey,
     { cookies: { getAll: () => [], setAll: () => {} } }
   );
 }

@@ -36,6 +36,9 @@ function GeneratingContent() {
       }
 
       const suggestRates = localStorage.getItem("boq_suggest_rates") === "1";
+      const isSOW = localStorage.getItem("boq_is_sow") !== "0";
+      const sowWarning = localStorage.getItem("boq_sow_warning") || null;
+      const documentType = localStorage.getItem("boq_document_type") || null;
 
       let progressTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -55,7 +58,14 @@ function GeneratingContent() {
         const res = await fetch("/api/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, session_id: sessionId, suggest_rates: suggestRates }),
+          body: JSON.stringify({
+            text,
+            session_id: sessionId,
+            suggest_rates: suggestRates,
+            is_sow: isSOW,
+            sow_warning: sowWarning,
+            document_type: documentType,
+          }),
         });
 
         setProgress(80);
@@ -85,6 +95,11 @@ function GeneratingContent() {
 
         localStorage.removeItem("boq_text");
         localStorage.removeItem("boq_suggest_rates");
+        localStorage.removeItem("boq_is_sow");
+        localStorage.removeItem("boq_sow_warning");
+        localStorage.removeItem("boq_sow_confidence");
+        localStorage.removeItem("boq_document_type");
+        localStorage.removeItem("boq_sow_flags");
 
         if (boq_id) {
           router.push(`/boq/${boq_id}`);

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { scoreBOQ } from "@/lib/claude";
+import { computeDeterministicQA } from "@/lib/boq-qa";
 import type { BOQDocument } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -30,13 +31,18 @@ export async function POST(
 
     const boqData = row.data as BOQDocument;
 
-    // Return cached score if it already exists
-    if (boqData.qa) {
+    // Return cached score if it already exists and is in the newer format.
+    if (boqData.qa?.updated_at) {
       return NextResponse.json({ qa: boqData.qa });
     }
 
     // Score the BOQ
-    const qa = await scoreBOQ(boqData);
+    let qa = computeDeterministicQA(boqData);
+    try {
+      qa = await scoreBOQ(boqData);
+    } catch (error) {
+      console.warn("QA route falling back to deterministic score:", error);
+    }
 
     // Persist the score back into the data JSON
     const updatedData = { ...boqData, qa };

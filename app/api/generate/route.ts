@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { generateBOQ } from "@/lib/claude";
+import { generateBOQ, validateSOW } from "@/lib/claude";
 import { getStripe } from "@/lib/stripe";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 
@@ -45,6 +45,9 @@ export async function POST(req: NextRequest) {
       text: string;
       session_id: string;
       suggest_rates?: boolean;
+      is_sow?: boolean;
+      sow_warning?: string;
+      document_type?: string;
     };
 
     if (!text || typeof text !== "string") {
@@ -60,6 +63,22 @@ export async function POST(req: NextRequest) {
 
     if (!session_id) {
       return NextResponse.json({ error: "Payment required" }, { status: 402 });
+    }
+
+    const validation = await validateSOW(text);
+    const clientSaysNotSOW = body.is_sow === false;
+    if (!validation.isSOW || clientSaysNotSOW) {
+      const reason =
+        validation.reason ||
+        body.sow_warning ||
+        "This document does not appear to be a construction Scope of Work suitable for BOQ generation.";
+      return NextResponse.json(
+        {
+          error: reason,
+          document_type: validation.documentType || body.document_type || "unknown",
+        },
+        { status: 422 }
+      );
     }
 
     // Verify payment
@@ -104,42 +123,58 @@ export async function POST(req: NextRequest) {
 
     const title = boq.project || "Untitled BOQ";
 
-    const { data: saved, error: dbError } = await dbClient
-      .from("boqs")
-      .insert({
-        user_id: user.id,
-        title,
-        data: boq,
-        stripe_session_id: session_id,
-      })
-      .select("id")
-      .single();
+    try {
+      const { data: saved, error: dbError } = await dbClient
+        .from("boqs")
+        .insert({
+          user_id: user.id,
+          title,
+          data: boq,
+          stripe_session_id: session_id,
+        })
+        .select("id")
+        .single();
 
-    if (dbError) {
-      console.error("Failed to save BOQ to DB:", dbError);
-      // Still return the BOQ so the user isn't left hanging
+      if (dbError) {
+        console.error("Failed to save BOQ to DB:", dbError);
+        return NextResponse.json({ boq, boq_id: null });
+      }
+
+      
+      // Record payment when we have a saved BOQ
+      await dbClient.from("payments").upsert(
+        {
+          stripe_session_id: session_id,
+          stripe_payment_intent: stripeSession.payment_intent as string | null,
+          user_id: user.id,
+          amount_cents: stripeSession.amount_total ?? 10000,
+          currency: stripeSession.currency ?? "usd",
+          status: "completed",
+          boq_id: saved.id,
+        },
+        { onConflict: "stripe_session_id", ignoreDuplicates: false }
+      );
+
+      
+      return NextResponse.json({ boq, boq_id: saved.id });
+    } catch (saveErr) {
+      console.error("Failed to save BOQ or record payment:", saveErr);
       return NextResponse.json({ boq, boq_id: null });
     }
-
-    // Record payment
-    await dbClient.from("payments").upsert(
-      {
-        stripe_session_id: session_id,
-        stripe_payment_intent: stripeSession.payment_intent as string | null,
-        user_id: user.id,
-        amount_cents: stripeSession.amount_total ?? 10000,
-        currency: stripeSession.currency ?? "usd",
-        status: "completed",
-        boq_id: saved.id,
-      },
-      { onConflict: "stripe_session_id", ignoreDuplicates: false }
-    );
-
-    return NextResponse.json({ boq, boq_id: saved.id });
   } catch (err) {
     console.error("BOQ generation error:", err);
     const message = err instanceof Error ? err.message : "Unknown error";
+    
+    const isExtractionFailure =
+      message.includes("Could not extract BOQ structure") ||
+      message.includes("no measurable items found");
+    if (isExtractionFailure) {
+      return NextResponse.json({ error: message }, { status: 422 });
+    }
     const classified = classifyGenerateError(message);
-    return NextResponse.json({ error: classified.safeMessage }, { status: classified.status });
+    return NextResponse.json(
+      { error: classified.safeMessage },
+      { status: classified.status }
+    );
   }
 }

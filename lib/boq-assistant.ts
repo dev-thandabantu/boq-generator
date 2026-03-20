@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { BOQDocument } from "./types";
 
 const PRIMARY_MODEL = process.env.GEMINI_MODEL_PRIMARY || "gemini-2.5-flash";
-const FALLBACK_MODEL = process.env.GEMINI_MODEL_FALLBACK || "gemini-2.0-flash";
+const FALLBACK_MODEL = process.env.GEMINI_MODEL_FALLBACK || PRIMARY_MODEL;
 const MAX_ATTEMPTS_PER_MODEL = 2;
 
 function getGenAI() {
@@ -50,7 +50,9 @@ function isTransientGeminiError(err: unknown): boolean {
     msg.includes("etimedout") ||
     msg.includes("econnreset") ||
     msg.includes("429") ||
-    msg.includes("quota")
+    msg.includes("quota") ||
+    msg.includes("no longer available") ||
+    (msg.includes("model") && msg.includes("not found"))
   );
 }
 
