@@ -3,6 +3,7 @@ import { PostHog } from "posthog-node";
 let _client: PostHog | null = null;
 
 function getClient(): PostHog | null {
+  if (process.env.NODE_ENV !== "production") return null;
   const key = process.env.NEXT_PUBLIC_POSTHOG_KEY;
   if (!key) return null;
   if (!_client) {
