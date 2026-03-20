@@ -503,16 +503,17 @@ export function patchExcelWithRates(
   const ws = wb.Sheets[sheetName];
   const range = XLSX.utils.decode_range(ws["!ref"] ?? "A1");
 
-  // Find the header row and column indices for Rate and Amount
+  // Find the header row and column indices for Rate, Amount, and QTY
   let headerRow = -1;
   let rateCol = -1;
   let amountCol = -1;
+  let qtyCol = -1;
 
   const rateHeaderNorm = rateColumnHeader.trim().toLowerCase();
   const amountHeaderNorm = amountColumnHeader.trim().toLowerCase();
 
-  // Scan first 10 rows for headers
-  for (let r = range.s.r; r <= Math.min(range.e.r, range.s.r + 9); r++) {
+  // Scan first 15 rows for headers
+  for (let r = range.s.r; r <= Math.min(range.e.r, range.s.r + 14); r++) {
     let foundRate = false;
     let foundAmount = false;
     for (let c = range.s.c; c <= range.e.c; c++) {
@@ -522,12 +523,16 @@ export function patchExcelWithRates(
       const text = String(cellVal.v ?? "").trim().toLowerCase();
       if (text === rateHeaderNorm) { rateCol = c; foundRate = true; }
       if (text === amountHeaderNorm) { amountCol = c; foundAmount = true; }
+      // Detect QTY column to use as a row discriminator
+      if (text === "qty" || text === "quantity" || text === "q'ty" || text === "quantities") {
+        qtyCol = c;
+      }
     }
     if (foundRate || foundAmount) { headerRow = r; break; }
   }
 
-  if (headerRow === -1 || (rateCol === -1 && amountCol === -1)) {
-    // Can't locate columns — return original unchanged
+  if (headerRow === -1 || rateCol === -1) {
+    // Can't locate rate column — return original unchanged
     return originalBuffer;
   }
 
@@ -536,30 +541,40 @@ export function patchExcelWithRates(
     bill.items.filter((item) => !item.is_header)
   );
 
-  // Walk data rows and fill rates/amounts by sequential position
+  // Walk data rows and fill rates by sequential position.
+  // Use the QTY column as the discriminator when available: only rows with a
+  // positive numeric QTY are genuine item rows. This skips preamble text,
+  // bill headers, section headers, and subtotal rows, all of which have no QTY.
   let itemIndex = 0;
   for (let r = headerRow + 1; r <= range.e.r && itemIndex < allItems.length; r++) {
-    // Check if this row has any content (skip fully blank rows)
-    let hasContent = false;
-    for (let c = range.s.c; c <= range.e.c; c++) {
-      const ref = XLSX.utils.encode_cell({ r, c });
-      if (ws[ref]?.v != null && String(ws[ref].v).trim() !== "") { hasContent = true; break; }
+    if (qtyCol !== -1) {
+      // Preferred path: only advance on rows that have a positive numeric QTY
+      const qtyCellRef = XLSX.utils.encode_cell({ r, c: qtyCol });
+      const qtyVal = ws[qtyCellRef]?.v;
+      if (typeof qtyVal !== "number" || qtyVal <= 0) continue;
+    } else {
+      // Fallback: skip fully blank rows (legacy behaviour for simple files)
+      let hasContent = false;
+      for (let c = range.s.c; c <= range.e.c; c++) {
+        const ref = XLSX.utils.encode_cell({ r, c });
+        if (ws[ref]?.v != null && String(ws[ref].v).trim() !== "") { hasContent = true; break; }
+      }
+      if (!hasContent) continue;
     }
-    if (!hasContent) continue;
 
     const item = allItems[itemIndex];
     itemIndex++;
 
     if (item.is_header) continue;
 
-    if (rateCol !== -1 && item.rate !== null) {
-      const rateRef = XLSX.utils.encode_cell({ r, c: rateCol });
-      ws[rateRef] = { v: item.rate, t: "n", z: "#,##0.00" };
+    // Write "Incl" as text for items that are absorbed into other rates
+    if (item.note && /incl/i.test(item.note)) {
+      ws[XLSX.utils.encode_cell({ r, c: rateCol })] = { v: "Incl", t: "s" };
+    } else if (item.rate !== null) {
+      ws[XLSX.utils.encode_cell({ r, c: rateCol })] = { v: item.rate, t: "n", z: "#,##0.00" };
     }
-    if (amountCol !== -1 && item.amount !== null) {
-      const amountRef = XLSX.utils.encode_cell({ r, c: amountCol });
-      ws[amountRef] = { v: item.amount, t: "n", z: "#,##0.00" };
-    }
+    // Amount column is intentionally NOT patched — the original =D*E formula
+    // auto-recalculates when the file is opened, preserving the formula chain.
   }
 
   return XLSX.write(wb, { type: "buffer", bookType: "xlsx" });

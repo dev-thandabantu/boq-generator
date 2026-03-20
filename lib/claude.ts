@@ -789,74 +789,103 @@ PRELIMINARIES & GENERAL:
 
 EARTHWORKS & SITE CLEARANCE:
 - Site clearing & grubbing: 15–45 ZMW/m²
-- Bulk excavation (soft ground): 80–150 ZMW/m³
-- Bulk excavation (hard/rocky): 180–450 ZMW/m³
-- Trench excavation: 120–280 ZMW/m³
+- Topsoil strip (100mm): 30–60 ZMW/m²
+- Bulk excavation in soft/pickable ground: 40–90 ZMW/m³ (common range: 55–70)
+- Bulk excavation in hard/rocky ground: 150–380 ZMW/m³
+- Trench excavation (soft ground): 80–200 ZMW/m³
 - Filling & compaction (imported fill): 140–320 ZMW/m³
-- Backfilling from excavation: 60–130 ZMW/m³
+- Backfilling from excavation: 40–80 ZMW/m³
+- Compacting surface/sub-grade: 100–200 ZMW/m²
 - Hardcore sub-base 150mm: 180–350 ZMW/m²
+- Dewatering during excavation: 1,500–5,000 ZMW/Item (lump sum per occurrence)
+- Termite/pest treatment: 15,000–30,000 ZMW/Item
 
 CONCRETE WORKS:
-- Concrete Grade 15 (blinding/lean): 1,800–2,800 ZMW/m³
+- Concrete Grade 15 (blinding/lean): 1,800–2,800 ZMW/m³ OR 1,000–2,000 ZMW/m² for standard 75mm blinding layer (Zambian practice often bills blinding per m²)
 - Concrete Grade 25: 2,500–4,200 ZMW/m³
-- Concrete Grade 30: 3,200–5,000 ZMW/m³
-- Reinforcement bar Y12–Y32: 30–55 ZMW/kg
+- Concrete Grade 30 (in-situ structural): 3,800–5,500 ZMW/m³ (common: ~4,800)
+- Reinforcement bar Y10–Y32: 35–55 ZMW/kg
+- R-bar (mild steel links/stirrups): 35–50 ZMW/kg
 - BRC mesh A142–A252: 280–550 ZMW/m²
 - Formwork (standard): 250–500 ZMW/m²
 
 MASONRY & WALLING:
-- Concrete hollow blocks 200mm: 280–480 ZMW/m²
-- Face brick walling: 400–700 ZMW/m²
+- Concrete hollow blocks 140mm: 300–450 ZMW/m²
+- Concrete hollow blocks 200mm: 350–520 ZMW/m²
+- Face/facing brick walling: 180–350 ZMW/m²
 - Random rubble stone walling: 350–600 ZMW/m²
+- Brickforce joint reinforcement: 8–18 ZMW/m
 
 PLASTERWORK & FINISHES:
 - Cement plaster internal: 120–220 ZMW/m²
 - Cement plaster external: 150–280 ZMW/m²
 - Ceramic floor tiles (supply & fix): 280–650 ZMW/m²
 - Ceramic wall tiles (supply & fix): 250–600 ZMW/m²
+- Tile skirting: 250–400 ZMW/m
+- Surface bed edge strips/formwork: 30–60 ZMW/m
+- DPM (polythene sheet): 40–80 ZMW/m²
 
 ROOFING:
 - IBR roofing sheets 0.5mm: 180–320 ZMW/m²
 - Corrugated iron sheets: 150–280 ZMW/m²
 - Timber purlins 76×50mm: 60–120 ZMW/lm
 - Pre-fabricated roof trusses: 350–700 ZMW/m² (plan area)
+- Fascia board: 80–160 ZMW/m
+- Barge board: 80–160 ZMW/m
+- Gutters & downpipes: 150–350 ZMW/m
 
 STRUCTURAL STEEL:
 - Steel columns/beams (fabricated & erected): 80–160 ZMW/kg
-- Structural steel fabrication: 120–220 ZMW/kg
+- Structural steel fabrication only: 60–120 ZMW/kg
+- Bolts & connections (M16–M24): 200–400 ZMW/No.
+- Steel base plates (fabricated): 80–160 ZMW/kg
+- Anti-corrosion paint on steel: 40–80 ZMW/m²
 
 DOORS & WINDOWS:
 - Flush door hollow-core 900×2100mm: 2,500–5,000 ZMW each
 - Flush door solid-core: 4,500–8,000 ZMW each
 - Steel security door: 6,000–15,000 ZMW each
 - Aluminium sliding window: 1,800–4,500 ZMW/m²
+- Steel door frame (supply & fix): 1,500–4,000 ZMW each
+- Door hardware (handle, hinges, lock set): 500–1,500 ZMW/set
+- Air brick (ventilation): 30–60 ZMW/No.
+- Minor ironmongery / bollards: 50–200 ZMW/Item
 
 PLUMBING & DRAINAGE:
 - uPVC soil pipe 110mm: 280–550 ZMW/lm
 - uPVC waste pipe 50mm: 150–300 ZMW/lm
 - PPR water supply pipe 20mm: 180–380 ZMW/lm
-- WC suite (close-coupled): 4,500–9,000 ZMW each
+- WC suite (close-coupled, supply & fix): 4,500–9,000 ZMW each
 - Wash basin including taps: 3,000–7,000 ZMW each
 - PVC storm drain 160mm: 350–650 ZMW/lm
 - Septic tank 1,500L prefab: 18,000–35,000 ZMW each
+- Floor/inspection manholes: 2,000–6,000 ZMW each
+- Copper PVC cable 2.5mm²: 1,500–2,500 ZMW/roll (100m roll)
 
 ELECTRICAL:
-- PVC conduit 20mm surface: 120–280 ZMW/lm
-- Single socket outlet 13A: 600–1,400 ZMW each
-- LED panel light fitting: 800–2,500 ZMW each
-- Consumer unit 8-way: 6,000–12,000 ZMW each
+- PVC conduit 20mm surface-mounted: 120–280 ZMW/lm
+- Single socket outlet 13A (supply & fix): 180–400 ZMW each (common: ~280)
+- Double socket outlet 13A: 300–600 ZMW each
+- Single light switch: 180–350 ZMW each
+- LED panel light fitting (supply & fix): 800–2,500 ZMW each
+- Fluorescent batten fitting: 400–900 ZMW each
+- Distribution board 8-way: 6,000–12,000 ZMW each
+- Main distribution board 100A+: 12,000–20,000 ZMW each (common: ~15,000)
 - Earthing & bonding (LS): 5,000–20,000 ZMW
+- Cable tray/trunking: 200–500 ZMW/m
 
 PAINTING & DECORATION:
 - Emulsion paint 2 coats internal: 80–160 ZMW/m²
 - External masonry paint 2 coats: 100–200 ZMW/m²
 - Gloss paint on timber 2 coats: 120–220 ZMW/m²
+- Anti-corrosion primer on steel: 40–80 ZMW/m²
 
 RATE RULES:
 1. Use conservative (lower-end) rates when scope or spec is unclear.
-2. Set rate to null for: header rows, items with is_header=true, items with note="Incl", items where qty is also null.
+2. Set rate to null for: header rows, items with is_header=true, items where qty is also null.
 3. Compute amount = qty × rate (round to 2 decimal places). Never leave amount null when both qty and rate are set.
-4. All rates are in Zambian Kwacha (ZMW).`;
+4. All rates are in Zambian Kwacha (ZMW).
+5. For preliminary items (mobilization, demobilization, site establishment) that are typically absorbed into other rates rather than priced separately, set rate to null and note to "Incl".`;
 
 const RATES_SCHEMA = {
   type: SchemaType.OBJECT,
