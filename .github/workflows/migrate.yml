@@ -61,19 +61,22 @@ jobs:
           PY
           )"
 
-          run_migration() {
+          run_migrations() {
             local host="$1"
             local port="$2"
             local user="$3"
 
-            echo "Attempting migration via host=$host port=$port user=$user"
-            PGSSLMODE=require psql \
-              -h "$host" \
-              -p "$port" \
-              -U "$user" \
-              -d "$PGDATABASE" \
-              --set ON_ERROR_STOP=1 \
-              -f supabase/migrations/001_initial.sql
+            echo "Attempting migrations via host=$host port=$port user=$user"
+            for f in $(ls supabase/migrations/*.sql | sort); do
+              echo "Applying $f..."
+              PGSSLMODE=require psql \
+                -h "$host" \
+                -p "$port" \
+                -U "$user" \
+                -d "$PGDATABASE" \
+                --set ON_ERROR_STOP=1 \
+                -f "$f"
+            done
           }
 
           if [[ "$PGHOST" =~ ^db\.([a-z0-9]+)\.supabase\.co$ ]] && [ -z "$DATABASE_POOLER_URL" ]; then
@@ -84,5 +87,5 @@ jobs:
             fi
           fi
 
-          run_migration "$PGHOST" "$PGPORT" "$PGUSER"
-          echo "Migration succeeded using direct DATABASE_URL host"
+          run_migrations "$PGHOST" "$PGPORT" "$PGUSER"
+          echo "All migrations succeeded"
