@@ -32,10 +32,14 @@ export async function proxy(request: NextRequest) {
 
   const { pathname } = request.nextUrl;
 
-  // Always allow: auth pages, webhooks, static assets
+  // Always allow: landing page, auth pages, policy pages, webhooks, static assets
   if (
+    pathname === "/" ||
     pathname.startsWith("/login") ||
     pathname.startsWith("/auth/") ||
+    pathname.startsWith("/privacy") ||
+    pathname.startsWith("/terms") ||
+    pathname.startsWith("/contact") ||
     pathname.startsWith("/api/webhooks/")
   ) {
     return supabaseResponse;

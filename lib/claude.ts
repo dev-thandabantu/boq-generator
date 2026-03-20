@@ -57,8 +57,8 @@ type QuantityPassResponse = {
   }>;
 };
 
-const PRIMARY_MODEL = process.env.GEMINI_MODEL_PRIMARY || "gemini-2.5-flash";
-const FALLBACK_MODEL = process.env.GEMINI_MODEL_FALLBACK || PRIMARY_MODEL;
+const PRIMARY_MODEL = process.env.GEMINI_MODEL_PRIMARY || "gemini-2.5-pro";
+const FALLBACK_MODEL = process.env.GEMINI_MODEL_FALLBACK || "gemini-2.5-flash";
 const MAX_ATTEMPTS_PER_MODEL = 3;
 const MODEL_CANDIDATES = Array.from(
   new Set([PRIMARY_MODEL, FALLBACK_MODEL, "gemini-2.5-flash"].filter(Boolean))
@@ -245,12 +245,13 @@ async function generateStructuredContent<T>({
       const model = getGenAI().getGenerativeModel({
         model: modelName,
         systemInstruction,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         generationConfig: {
           responseMimeType: "application/json",
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           responseSchema: responseSchema as any,
           temperature,
-        },
+          thinkingConfig: { thinkingBudget: -1 },
+        } as any,
       });
       const result = await model.generateContent(prompt);
       return parseJsonResponse<T>(result.response.text());
@@ -771,12 +772,324 @@ export async function scoreBOQ(boq: import("./types").BOQDocument): Promise<{
   }
 }
 
+// ─── Rate Estimation ────────────────────────────────────────────────────────
+
+const RATES_INSTRUCTION = `ZAMBIAN CONSTRUCTION MARKET RATES (Q1 2026, ZMW) — use for rate estimation:
+
+PRELIMINARIES & GENERAL:
+- Mobilisation/demobilisation: 50,000–500,000 ZMW (LS, scale with project size)
+- Site establishment & offices: 30,000–200,000 ZMW (LS)
+- Health, safety & environmental: 15,000–100,000 ZMW (LS)
+- Project management & supervision: use LS item ~5–8% of works cost
+- Insurance & performance bond: 1.5–2.5% of contract sum (LS)
+- As-built drawings & documentation: 10,000–50,000 ZMW (LS)
+
+EARTHWORKS & SITE CLEARANCE:
+- Site clearing & grubbing: 15–45 ZMW/m²
+- Bulk excavation (soft ground): 80–150 ZMW/m³
+- Bulk excavation (hard/rocky): 180–450 ZMW/m³
+- Trench excavation: 120–280 ZMW/m³
+- Filling & compaction (imported fill): 140–320 ZMW/m³
+- Backfilling from excavation: 60–130 ZMW/m³
+- Hardcore sub-base 150mm: 180–350 ZMW/m²
+
+CONCRETE WORKS:
+- Concrete Grade 15 (blinding/lean): 1,800–2,800 ZMW/m³
+- Concrete Grade 25: 2,500–4,200 ZMW/m³
+- Concrete Grade 30: 3,200–5,000 ZMW/m³
+- Reinforcement bar Y12–Y32: 30–55 ZMW/kg
+- BRC mesh A142–A252: 280–550 ZMW/m²
+- Formwork (standard): 250–500 ZMW/m²
+
+MASONRY & WALLING:
+- Concrete hollow blocks 200mm: 280–480 ZMW/m²
+- Face brick walling: 400–700 ZMW/m²
+- Random rubble stone walling: 350–600 ZMW/m²
+
+PLASTERWORK & FINISHES:
+- Cement plaster internal: 120–220 ZMW/m²
+- Cement plaster external: 150–280 ZMW/m²
+- Ceramic floor tiles (supply & fix): 280–650 ZMW/m²
+- Ceramic wall tiles (supply & fix): 250–600 ZMW/m²
+
+ROOFING:
+- IBR roofing sheets 0.5mm: 180–320 ZMW/m²
+- Corrugated iron sheets: 150–280 ZMW/m²
+- Timber purlins 76×50mm: 60–120 ZMW/lm
+- Pre-fabricated roof trusses: 350–700 ZMW/m² (plan area)
+
+STRUCTURAL STEEL:
+- Steel columns/beams (fabricated & erected): 80–160 ZMW/kg
+- Structural steel fabrication: 120–220 ZMW/kg
+
+DOORS & WINDOWS:
+- Flush door hollow-core 900×2100mm: 2,500–5,000 ZMW each
+- Flush door solid-core: 4,500–8,000 ZMW each
+- Steel security door: 6,000–15,000 ZMW each
+- Aluminium sliding window: 1,800–4,500 ZMW/m²
+
+PLUMBING & DRAINAGE:
+- uPVC soil pipe 110mm: 280–550 ZMW/lm
+- uPVC waste pipe 50mm: 150–300 ZMW/lm
+- PPR water supply pipe 20mm: 180–380 ZMW/lm
+- WC suite (close-coupled): 4,500–9,000 ZMW each
+- Wash basin including taps: 3,000–7,000 ZMW each
+- PVC storm drain 160mm: 350–650 ZMW/lm
+- Septic tank 1,500L prefab: 18,000–35,000 ZMW each
+
+ELECTRICAL:
+- PVC conduit 20mm surface: 120–280 ZMW/lm
+- Single socket outlet 13A: 600–1,400 ZMW each
+- LED panel light fitting: 800–2,500 ZMW each
+- Consumer unit 8-way: 6,000–12,000 ZMW each
+- Earthing & bonding (LS): 5,000–20,000 ZMW
+
+PAINTING & DECORATION:
+- Emulsion paint 2 coats internal: 80–160 ZMW/m²
+- External masonry paint 2 coats: 100–200 ZMW/m²
+- Gloss paint on timber 2 coats: 120–220 ZMW/m²
+
+RATE RULES:
+1. Use conservative (lower-end) rates when scope or spec is unclear.
+2. Set rate to null for: header rows, items with is_header=true, items with note="Incl", items where qty is also null.
+3. Compute amount = qty × rate (round to 2 decimal places). Never leave amount null when both qty and rate are set.
+4. All rates are in Zambian Kwacha (ZMW).`;
+
+const RATES_SCHEMA = {
+  type: SchemaType.OBJECT,
+  properties: {
+    items: {
+      type: SchemaType.ARRAY,
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          item_key: { type: SchemaType.STRING },
+          rate: { type: SchemaType.NUMBER, nullable: true },
+          amount: { type: SchemaType.NUMBER, nullable: true },
+        },
+        required: ["item_key"],
+      },
+    },
+  },
+  required: ["items"],
+};
+
+const BOQ_DOCUMENT_SCHEMA = {
+  type: SchemaType.OBJECT,
+  properties: {
+    project: { type: SchemaType.STRING },
+    location: { type: SchemaType.STRING },
+    prepared_by: { type: SchemaType.STRING },
+    date: { type: SchemaType.STRING },
+    bills: {
+      type: SchemaType.ARRAY,
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          number: { type: SchemaType.NUMBER },
+          title: { type: SchemaType.STRING },
+          items: {
+            type: SchemaType.ARRAY,
+            items: {
+              type: SchemaType.OBJECT,
+              properties: {
+                item_no: { type: SchemaType.STRING, nullable: true },
+                description: { type: SchemaType.STRING },
+                unit: { type: SchemaType.STRING, nullable: true },
+                qty: { type: SchemaType.NUMBER, nullable: true },
+                rate: { type: SchemaType.NUMBER, nullable: true },
+                amount: { type: SchemaType.NUMBER, nullable: true },
+                is_header: { type: SchemaType.BOOLEAN, nullable: true },
+                note: { type: SchemaType.STRING, nullable: true },
+              },
+              required: ["description"],
+            },
+          },
+        },
+        required: ["number", "title", "items"],
+      },
+    },
+  },
+  required: ["project", "location", "prepared_by", "date", "bills"],
+};
+
+const BOQ_VALIDATION_SCHEMA = {
+  type: SchemaType.OBJECT,
+  properties: {
+    isValid: {
+      type: SchemaType.BOOLEAN,
+      description: "True if this spreadsheet is a genuine Bill of Quantities with item descriptions, units, and quantities",
+    },
+    totalItems: {
+      type: SchemaType.NUMBER,
+      description: "Total count of non-header line items detected in the spreadsheet",
+    },
+    missingRateCount: {
+      type: SchemaType.NUMBER,
+      description: "Count of non-header items that have a quantity but no rate (rate cell is empty or zero)",
+    },
+    rateColumnHeader: {
+      type: SchemaType.STRING,
+      nullable: true,
+      description: "Exact text of the column header for rates (e.g. 'Rate', 'Unit Rate', 'Rate (ZMW)'). Null if not found.",
+    },
+    amountColumnHeader: {
+      type: SchemaType.STRING,
+      nullable: true,
+      description: "Exact text of the column header for amounts/totals (e.g. 'Amount', 'Total', 'Amount (ZMW)'). Null if not found.",
+    },
+    errorMessage: {
+      type: SchemaType.STRING,
+      nullable: true,
+      description: "Human-readable reason if isValid=false. Null if valid.",
+    },
+  },
+  required: ["isValid", "totalItems", "missingRateCount"],
+};
+
+type BOQValidationResult = {
+  isValid: boolean;
+  totalItems: number;
+  missingRateCount: number;
+  rateColumnHeader: string | null;
+  amountColumnHeader: string | null;
+  errorMessage: string | null;
+};
+
+/**
+ * Validates whether an uploaded spreadsheet is a genuine BOQ,
+ * and identifies the Rate and Amount column headers for later patching.
+ */
+export async function validateBOQ(csvText: string): Promise<BOQValidationResult> {
+  const preview = csvText.slice(0, 8000);
+  return generateStructuredContent<BOQValidationResult>({
+    preferredModel: FALLBACK_MODEL,
+    responseSchema: BOQ_VALIDATION_SCHEMA,
+    temperature: 0,
+    prompt: `Analyse the following spreadsheet data (CSV/table format) and determine whether it is a genuine Bill of Quantities (BOQ).
+
+A valid BOQ has:
+- A column for item descriptions/work items
+- A column for units of measurement (m², m³, lm, No., LS, kg, etc.)
+- A column for quantities
+- Optionally a column for rates and/or amounts
+
+Count all non-header line items and how many are missing rates.
+Identify the EXACT text of the Rate column header and Amount column header (copy them verbatim from the data — do not paraphrase).
+
+Spreadsheet data:
+${preview}`,
+  });
+}
+
+async function fillRatesPass(boq: BOQDocument): Promise<BOQDocument> {
+  const allItems = boq.bills.flatMap((bill) =>
+    bill.items
+      .filter((item) => !item.is_header && item.rate === null)
+      .map((item) => ({
+        item_key: item.item_key ?? `${item.item_no || item.description.slice(0, 20)}`,
+        description: item.description,
+        unit: item.unit,
+        qty: item.qty,
+      }))
+  );
+
+  if (allItems.length === 0) return boq;
+
+  const result = await generateStructuredContent<{ items: Array<{ item_key: string; rate: number | null; amount: number | null }> }>({
+    preferredModel: PRIMARY_MODEL,
+    responseSchema: RATES_SCHEMA,
+    temperature: 0.1,
+    systemInstruction: `You are a quantity surveyor estimating rates for a Zambian construction BOQ.\n\n${RATES_INSTRUCTION}`,
+    prompt: `Estimate ZMW rates for the following BOQ items. Return rate and amount for each item_key.\n\n${JSON.stringify(allItems)}`,
+  });
+
+  const rateMap = new Map<string, { rate: number | null; amount: number | null }>();
+  for (const r of result.items ?? []) {
+    if (r.item_key) rateMap.set(r.item_key, { rate: r.rate ?? null, amount: r.amount ?? null });
+  }
+
+  return {
+    ...boq,
+    bills: boq.bills.map((bill) => ({
+      ...bill,
+      items: bill.items.map((item) => {
+        if (item.is_header || item.rate !== null) return item;
+        const itemKey = item.item_key ?? `${item.item_no || item.description.slice(0, 20)}`;
+        const rateData = rateMap.get(itemKey);
+        if (!rateData) return item;
+        const rate = rateData.rate ?? null;
+        const qty = item.qty;
+        const amount = rateData.amount ?? (rate !== null && qty !== null ? +(qty * rate).toFixed(2) : null);
+        return { ...item, rate, amount };
+      }),
+    })),
+  };
+}
+
+/**
+ * Parses an Excel BOQ (provided as CSV text) and fills missing rates
+ * using Zambian construction market rates.
+ */
+export async function fillBOQRates(csvText: string): Promise<BOQDocument> {
+  const truncated = csvText.length > 60000 ? csvText.slice(0, 60000) + "\n...[truncated]" : csvText;
+
+  const raw = await generateStructuredContent<BOQDocument>({
+    preferredModel: PRIMARY_MODEL,
+    responseSchema: BOQ_DOCUMENT_SCHEMA,
+    temperature: 0.1,
+    systemInstruction: `You are a senior quantity surveyor parsing an Excel Bill of Quantities and filling missing rates.
+
+${RATES_INSTRUCTION}
+
+PARSING RULES:
+1. Parse the spreadsheet data into a structured BOQDocument JSON.
+2. Preserve ALL items from the spreadsheet — do not drop any rows.
+3. Preserve existing quantities, units, and descriptions verbatim.
+4. Preserve any existing rates and amounts that are already filled in.
+5. Fill in rates for items that have a quantity but no rate, using the Zambian market rates above.
+6. Group items into bills based on the section headers in the spreadsheet.
+7. If no section structure is visible, put all items into a single bill.
+8. Set is_header=true for section header rows (rows with no qty/unit/rate).
+9. Infer project name, location, and date from the spreadsheet if present; otherwise use reasonable placeholders.`,
+    prompt: `Parse this BOQ spreadsheet and fill missing rates:\n\n${truncated}`,
+  });
+
+  // Normalise and ensure amounts are computed
+  return {
+    project: raw.project || "Uploaded BOQ",
+    location: raw.location || "Zambia",
+    prepared_by: raw.prepared_by || "BOQ Generator",
+    date: raw.date || new Date().toISOString().slice(0, 10),
+    bills: (raw.bills ?? []).map((bill, billIdx) => ({
+      number: bill.number ?? billIdx + 1,
+      title: bill.title || `Bill ${billIdx + 1}`,
+      items: (bill.items ?? []).map((item) => {
+        const qty = typeof item.qty === "number" && isFinite(item.qty) && item.qty > 0 ? item.qty : null;
+        const rate = typeof item.rate === "number" && isFinite(item.rate) && item.rate > 0 ? item.rate : null;
+        const amount = typeof item.amount === "number" && isFinite(item.amount) && item.amount > 0
+          ? item.amount
+          : (qty !== null && rate !== null ? +(qty * rate).toFixed(2) : null);
+        return {
+          item_no: item.item_no ?? "",
+          description: item.description || "Unspecified item",
+          unit: item.unit || "Item",
+          qty,
+          rate,
+          amount,
+          is_header: item.is_header ?? false,
+          note: item.note ?? undefined,
+        };
+      }),
+    })),
+    pipeline_version: "excel-rate-v1.0",
+  };
+}
+
 export async function generateBOQ(
   sowText: string,
   opts?: { suggestRates?: boolean }
 ): Promise<BOQDocument> {
-  
-  void opts?.suggestRates; // reserved for future rate-suggestion pass
   const structureRaw = await generateStructure(sowText, false);
   let structure = normalizeStructure(structureRaw);
 
@@ -792,7 +1105,11 @@ export async function generateBOQ(
   }
 
   const quantitiesRaw = await extractQuantities(sowText, structure);
-  return mergeStructureAndQuantities(structure, quantitiesRaw);
+  const boq = mergeStructureAndQuantities(structure, quantitiesRaw);
+  if (opts?.suggestRates) {
+    return fillRatesPass(boq);
+  }
+  return boq;
 }
 
 function mergeStructureAndQuantities(

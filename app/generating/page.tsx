@@ -27,18 +27,8 @@ function GeneratingContent() {
         return;
       }
 
-      const text = localStorage.getItem("boq_text");
-      if (!text) {
-        setError(
-          "Your PDF session expired. If you were charged, please contact us with your payment reference."
-        );
-        return;
-      }
-
-      const suggestRates = localStorage.getItem("boq_suggest_rates") === "1";
-      const isSOW = localStorage.getItem("boq_is_sow") !== "0";
-      const sowWarning = localStorage.getItem("boq_sow_warning") || null;
-      const documentType = localStorage.getItem("boq_document_type") || null;
+      const boqType = localStorage.getItem("boq_type") ?? "generate";
+      const isRateBoq = boqType === "rate_boq";
 
       let progressTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -50,23 +40,52 @@ function GeneratingContent() {
           if (elapsed > 20) {
             setStatusText("Still working. Complex BOQs can take a bit longer...");
           } else if (elapsed > 8) {
-            setStatusText("Classifying trades, quantities, and units...");
+            setStatusText(
+              isRateBoq
+                ? "Matching Zambian market rates to your items..."
+                : "Classifying trades, quantities, and units..."
+            );
           }
         }, 2000);
 
         setProgress(30);
-        const res = await fetch("/api/generate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text,
-            session_id: sessionId,
-            suggest_rates: suggestRates,
-            is_sow: isSOW,
-            sow_warning: sowWarning,
-            document_type: documentType,
-          }),
-        });
+
+        let res: Response;
+
+        if (isRateBoq) {
+          setStatusText("AI is parsing your BOQ and filling in rates...");
+          res = await fetch("/api/rate-boq", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sessionId }),
+          });
+        } else {
+          const text = localStorage.getItem("boq_text");
+          if (!text) {
+            setError(
+              "Your session expired. If you were charged, please contact us with your payment reference."
+            );
+            return;
+          }
+          const suggestRates = localStorage.getItem("boq_suggest_rates") === "1";
+          const isSOW = localStorage.getItem("boq_is_sow") !== "0";
+          const sowWarning = localStorage.getItem("boq_sow_warning") || null;
+          const documentType = localStorage.getItem("boq_document_type") || null;
+
+          setStatusText("AI is reading your Scope of Work and extracting bill items...");
+          res = await fetch("/api/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              text,
+              session_id: sessionId,
+              suggest_rates: suggestRates,
+              is_sow: isSOW,
+              sow_warning: sowWarning,
+              document_type: documentType,
+            }),
+          });
+        }
 
         setProgress(80);
 
@@ -78,21 +97,22 @@ function GeneratingContent() {
             throw new Error("AI quota exceeded. Please try again in a minute.");
           if (res.status === 503)
             throw new Error("AI service is temporarily busy. Please wait a moment and try again.");
-          throw new Error(e || "BOQ generation failed");
+          throw new Error(e || (isRateBoq ? "Rate filling failed" : "BOQ generation failed"));
         }
 
         const { boq, boq_id } = await res.json();
         setProgress(100);
 
-        ph.capture("boq_generated", {
+        ph.capture(isRateBoq ? "boq_rates_filled" : "boq_generated", {
           boq_id,
           bill_count: boq?.bills?.length ?? 0,
           item_count: (boq?.bills ?? []).reduce(
             (s: number, b: { items?: unknown[] }) => s + (b.items?.length ?? 0), 0
           ),
-          suggest_rates: suggestRates,
         });
 
+        // Clean up localStorage
+        localStorage.removeItem("boq_type");
         localStorage.removeItem("boq_text");
         localStorage.removeItem("boq_suggest_rates");
         localStorage.removeItem("boq_is_sow");
@@ -104,7 +124,6 @@ function GeneratingContent() {
         if (boq_id) {
           router.push(`/boq/${boq_id}`);
         } else {
-          // Fallback: save to sessionStorage if DB save failed
           sessionStorage.setItem("boq_data", JSON.stringify(boq));
           router.push("/boq");
         }
