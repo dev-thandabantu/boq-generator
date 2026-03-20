@@ -707,7 +707,8 @@ function AssistantPanel({
           </button>
         </div>
         {assistantStatus && (
-          <div className="mt-2 inline-flex items-center rounded-full bg-amber-500/15 border border-amber-500/30 px-2.5 py-1 text-[11px] text-amber-200">
+          <div className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-amber-500/15 border border-amber-500/30 px-2.5 py-1 text-[11px] text-amber-200">
+            <span className="w-2.5 h-2.5 rounded-full border border-amber-300/60 border-t-transparent animate-spin shrink-0" />
             {assistantStatus}
           </div>
         )}
@@ -747,7 +748,15 @@ function AssistantPanel({
                   <span className="block text-[10px] uppercase tracking-wide opacity-70 mb-1">
                     {message.role === "user" ? "You" : "Assistant"}
                   </span>
-                  <p className="whitespace-pre-wrap break-words">{displayMessage(message.content)}</p>
+                  {message.role === "assistant" && !message.content ? (
+                    <span className="inline-flex gap-1 items-center h-4 mt-0.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-300/70 animate-bounce" style={{ animationDelay: "0ms" }} />
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-300/70 animate-bounce" style={{ animationDelay: "150ms" }} />
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-300/70 animate-bounce" style={{ animationDelay: "300ms" }} />
+                    </span>
+                  ) : (
+                    <p className="whitespace-pre-wrap break-words">{displayMessage(message.content)}</p>
+                  )}
                 </div>
               ))}
             </div>
@@ -818,7 +827,12 @@ function AssistantPanel({
           disabled={assistantBusy || !assistantInput.trim()}
           className="w-full px-4 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-black text-sm font-semibold transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
         >
-          {assistantBusy ? "Thinking…" : "Generate proposal"}
+          {assistantBusy ? (
+            <span className="inline-flex items-center gap-2">
+              <span className="w-3.5 h-3.5 rounded-full border-2 border-black/40 border-t-transparent animate-spin" />
+              Thinking…
+            </span>
+          ) : "Generate proposal"}
         </button>
       </div>
     </section>

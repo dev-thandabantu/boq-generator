@@ -285,7 +285,7 @@ function GenerateBOQTab() {
 
 // ─── Rate Existing BOQ Tab ───────────────────────────────────────────────────
 
-type RateStage = "idle" | "validating" | "ready" | "paying" | "error";
+type RateStage = "idle" | "validating" | "questions" | "ready" | "paying" | "error";
 
 interface BOQPreview {
   totalItems: number;
@@ -293,6 +293,27 @@ interface BOQPreview {
   rateColumnHeader: string | null;
   amountColumnHeader: string | null;
 }
+
+interface RateContext {
+  province: string;
+  accessibility: string;
+  labourSource: string;
+  equipment: string;
+  marginPct: number;
+}
+
+const PROVINCES = [
+  "Lusaka", "Copperbelt", "Southern", "Eastern", "Northern",
+  "Western", "Luapula", "North-Western", "Muchinga", "Central",
+];
+
+const DEFAULT_CONTEXT: RateContext = {
+  province: "Lusaka",
+  accessibility: "main_road",
+  labourSource: "mixed",
+  equipment: "contractor_owned",
+  marginPct: 15,
+};
 
 function RateBOQTab() {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -302,6 +323,8 @@ function RateBOQTab() {
   const [dragging, setDragging] = useState(false);
   const [storageKey, setStorageKey] = useState<string | null>(null);
   const [preview, setPreview] = useState<BOQPreview | null>(null);
+  const [ctx, setCtx] = useState<RateContext>(DEFAULT_CONTEXT);
+  const [customMargin, setCustomMargin] = useState(false);
   const ph = usePostHog();
 
   function handleFile(f: File) {
@@ -337,7 +360,7 @@ function RateBOQTab() {
         total_items: p.totalItems,
         missing_rate_count: p.missingRateCount,
       });
-      setStage("ready");
+      setStage("questions");
     } catch (err) {
       setStage("error");
       const msg = err instanceof Error ? err.message : "Something went wrong";
@@ -345,10 +368,16 @@ function RateBOQTab() {
     }
   }
 
+  function handleQuestionsSubmit() {
+    localStorage.setItem("boq_rate_context", JSON.stringify(ctx));
+    setStage("ready");
+  }
+
   async function handleCheckout() {
     if (!storageKey || !preview) return;
     localStorage.setItem("boq_type", "rate_boq");
-    ph.capture("payment_initiated", { type: "rate_boq" });
+    localStorage.setItem("boq_rate_context", JSON.stringify(ctx));
+    ph.capture("payment_initiated", { type: "rate_boq", province: ctx.province });
     setStage("paying");
     setError(null);
 
@@ -378,16 +407,176 @@ function RateBOQTab() {
 
   const isProcessing = stage === "validating" || stage === "paying";
 
+  // ── Questions form ──────────────────────────────────────────────────────────
+  if (stage === "questions") {
+    return (
+      <div className="space-y-6">
+        <div className="text-center">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-green-500/30 bg-green-500/10 text-green-400 text-xs font-medium mb-3">
+            <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+            </svg>
+            {preview?.totalItems} items · {preview?.missingRateCount} missing rates
+          </div>
+          <h2 className="text-xl font-bold text-white">Tell us about the project</h2>
+          <p className="text-xs text-gray-400 mt-1">
+            These 5 questions help the AI calibrate rates to your actual site conditions.
+          </p>
+        </div>
+
+        <div className="space-y-4">
+          {/* Q1 Province */}
+          <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4 space-y-2">
+            <p className="text-sm font-medium text-white">1. Which province is the project in?</p>
+            <div className="flex flex-wrap gap-2">
+              {PROVINCES.map((p) => (
+                <button key={p}
+                  onClick={() => setCtx((c) => ({ ...c, province: p }))}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                    ctx.province === p
+                      ? "bg-amber-400 text-black"
+                      : "bg-white/10 text-gray-300 hover:bg-white/15"
+                  }`}>
+                  {p}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Q2 Site accessibility */}
+          <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4 space-y-2">
+            <p className="text-sm font-medium text-white">2. How accessible is the site?</p>
+            <p className="text-xs text-gray-500">This affects transport premiums on materials.</p>
+            <div className="space-y-2 mt-1">
+              {[
+                { val: "main_road", label: "Main road access", sub: "Standard transport costs" },
+                { val: "gravel_road", label: "Gravel / secondary road", sub: "+10–20% transport premium" },
+                { val: "remote", label: "Remote or bush site", sub: "+25–40% transport premium" },
+              ].map(({ val, label, sub }) => (
+                <button key={val} onClick={() => setCtx((c) => ({ ...c, accessibility: val }))}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left transition-colors ${
+                    ctx.accessibility === val
+                      ? "bg-amber-400/15 border border-amber-400/40"
+                      : "bg-white/5 border border-white/10 hover:bg-white/10"
+                  }`}>
+                  <span className={`w-3.5 h-3.5 rounded-full border-2 shrink-0 ${ctx.accessibility === val ? "border-amber-400 bg-amber-400" : "border-gray-500"}`} />
+                  <span>
+                    <span className="text-sm text-white block">{label}</span>
+                    <span className="text-xs text-gray-400">{sub}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Q3 Labour */}
+          <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4 space-y-2">
+            <p className="text-sm font-medium text-white">3. What&apos;s the expected labour source?</p>
+            <div className="space-y-2 mt-1">
+              {[
+                { val: "local_unskilled", label: "Mostly local unskilled labour", sub: "Lower labour rates, minimal mobilisation" },
+                { val: "mixed", label: "Mix of skilled & unskilled", sub: "Mid-range rates — most common scenario" },
+                { val: "imported_skilled", label: "Mostly imported / specialist trades", sub: "Higher rates + accommodation & mobilisation" },
+              ].map(({ val, label, sub }) => (
+                <button key={val} onClick={() => setCtx((c) => ({ ...c, labourSource: val }))}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left transition-colors ${
+                    ctx.labourSource === val
+                      ? "bg-amber-400/15 border border-amber-400/40"
+                      : "bg-white/5 border border-white/10 hover:bg-white/10"
+                  }`}>
+                  <span className={`w-3.5 h-3.5 rounded-full border-2 shrink-0 ${ctx.labourSource === val ? "border-amber-400 bg-amber-400" : "border-gray-500"}`} />
+                  <span>
+                    <span className="text-sm text-white block">{label}</span>
+                    <span className="text-xs text-gray-400">{sub}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Q4 Equipment */}
+          <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4 space-y-2">
+            <p className="text-sm font-medium text-white">4. How will plant & equipment be sourced?</p>
+            <div className="space-y-2 mt-1">
+              {[
+                { val: "contractor_owned", label: "Contractor owns most equipment", sub: "No external hire premium" },
+                { val: "mostly_hired", label: "Mostly hired in", sub: "Include plant hire margin in rates" },
+              ].map(({ val, label, sub }) => (
+                <button key={val} onClick={() => setCtx((c) => ({ ...c, equipment: val }))}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left transition-colors ${
+                    ctx.equipment === val
+                      ? "bg-amber-400/15 border border-amber-400/40"
+                      : "bg-white/5 border border-white/10 hover:bg-white/10"
+                  }`}>
+                  <span className={`w-3.5 h-3.5 rounded-full border-2 shrink-0 ${ctx.equipment === val ? "border-amber-400 bg-amber-400" : "border-gray-500"}`} />
+                  <span>
+                    <span className="text-sm text-white block">{label}</span>
+                    <span className="text-xs text-gray-400">{sub}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Q5 Margin */}
+          <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4 space-y-2">
+            <p className="text-sm font-medium text-white">5. Target overhead & profit margin</p>
+            <p className="text-xs text-gray-500">Applied on top of base construction rates.</p>
+            <div className="flex flex-wrap gap-2 mt-1">
+              {[10, 15, 20].map((pct) => (
+                <button key={pct}
+                  onClick={() => { setCtx((c) => ({ ...c, marginPct: pct })); setCustomMargin(false); }}
+                  className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                    ctx.marginPct === pct && !customMargin
+                      ? "bg-amber-400 text-black"
+                      : "bg-white/10 text-gray-300 hover:bg-white/15"
+                  }`}>
+                  {pct}%
+                </button>
+              ))}
+              <button
+                onClick={() => setCustomMargin(true)}
+                className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                  customMargin ? "bg-amber-400 text-black" : "bg-white/10 text-gray-300 hover:bg-white/15"
+                }`}>
+                Custom
+              </button>
+            </div>
+            {customMargin && (
+              <div className="flex items-center gap-2 mt-2">
+                <input
+                  type="number"
+                  min={1} max={50}
+                  value={ctx.marginPct}
+                  onChange={(e) => setCtx((c) => ({ ...c, marginPct: Math.min(50, Math.max(1, Number(e.target.value) || 15)) }))}
+                  className="w-20 px-3 py-1.5 rounded-md bg-white/10 border border-white/20 text-white text-sm text-center focus:outline-none focus:border-amber-400/60"
+                />
+                <span className="text-sm text-gray-400">% margin</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <button
+          onClick={handleQuestionsSubmit}
+          className="w-full py-3.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-black font-semibold text-sm transition-colors">
+          Continue to payment →
+        </button>
+      </div>
+    );
+  }
+
+  // ── Payment screen ──────────────────────────────────────────────────────────
   if (stage === "ready" || stage === "paying") {
     return (
       <div className="text-center space-y-6">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight mb-3">BOQ validated</h2>
+          <h2 className="text-2xl font-bold tracking-tight mb-3">Ready to rate</h2>
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-green-500/30 bg-green-500/10 text-green-400 text-xs font-medium">
             <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
               <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
             </svg>
-            {preview?.totalItems} items detected · {preview?.missingRateCount} missing rates
+            {preview?.totalItems} items · {preview?.missingRateCount} missing rates · {ctx.province} · {ctx.marginPct}% margin
           </div>
         </div>
 
@@ -397,8 +586,8 @@ function RateBOQTab() {
           </div>
           <p className="text-sm text-white truncate flex-1">{file?.name}</p>
           <button className="text-xs text-gray-500 hover:text-gray-300 shrink-0"
-            onClick={() => { setFile(null); setStage("idle"); setPreview(null); setStorageKey(null); }}>
-            Change
+            onClick={() => { setStage("questions"); }}>
+            Edit answers
           </button>
         </div>
 
@@ -415,10 +604,10 @@ function RateBOQTab() {
           </div>
           <ul className="space-y-2">
             {[
-              `AI fills rates for ${preview?.missingRateCount} items using Zambian market rates`,
-              "Download your original Excel file with rates added",
+              `AI fills rates for ${preview?.missingRateCount} items calibrated to ${ctx.province} conditions`,
+              "Download your original Excel file with rates added in-place",
               "Or download a freshly formatted BOQ in our house style",
-              "Editable in the BOQ editor — adjust before exporting",
+              "Editable in the BOQ editor — review and adjust before exporting",
             ].map((item) => (
               <li key={item} className="flex items-start gap-2 text-sm text-gray-300">
                 <svg className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
@@ -450,6 +639,7 @@ function RateBOQTab() {
     );
   }
 
+  // ── Upload screen ───────────────────────────────────────────────────────────
   return (
     <>
       <div className="text-center mb-8">
@@ -515,12 +705,17 @@ function RateBOQTab() {
         className={`mt-6 w-full py-3 rounded-lg font-semibold text-sm transition-all
           ${file && !isProcessing ? "bg-amber-400 hover:bg-amber-300 text-black cursor-pointer" : "bg-white/5 text-gray-600 cursor-not-allowed"}`}
         disabled={!file || isProcessing} onClick={handleValidate}>
-        {isProcessing ? (stage === "validating" ? "Validating…" : "Redirecting…") : "Validate & Continue →"}
+        {isProcessing ? (
+          <span className="inline-flex items-center gap-2">
+            <span className="w-3.5 h-3.5 rounded-full border-2 border-black/40 border-t-transparent animate-spin" />
+            Validating…
+          </span>
+        ) : "Validate & Continue →"}
       </button>
 
       <p className="mt-8 text-center text-xs text-gray-600">
         Works with any BOQ structure. Items, quantities, and descriptions are preserved verbatim.
-        <br />Rates are estimated from Zambian construction market data.
+        <br />Rates are calibrated to your site location, labour, and margin.
       </p>
     </>
   );

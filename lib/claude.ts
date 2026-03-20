@@ -1027,11 +1027,46 @@ async function fillRatesPass(boq: BOQDocument): Promise<BOQDocument> {
   };
 }
 
+export type RateContext = {
+  province: string;        // e.g. "Lusaka", "Copperbelt", "Eastern"
+  accessibility: string;  // "main_road" | "gravel_road" | "remote"
+  labourSource: string;   // "local_unskilled" | "mixed" | "imported_skilled"
+  equipment: string;      // "contractor_owned" | "mostly_hired"
+  marginPct: number;       // e.g. 10, 15, 20
+};
+
+function buildRateContextBlock(ctx: RateContext): string {
+  const accessibilityLabel =
+    ctx.accessibility === "main_road" ? "Good access (main road) — standard transport costs" :
+    ctx.accessibility === "gravel_road" ? "Gravel/secondary road — add 10–20% transport premium" :
+    "Remote/bush site — add 25–40% transport premium on materials";
+
+  const labourLabel =
+    ctx.labourSource === "local_unskilled" ? "Mostly local unskilled labour available (use lower end of skilled rates)" :
+    ctx.labourSource === "mixed" ? "Mix of local and imported skilled trades (use mid-range rates)" :
+    "Mostly imported or specialist skilled labour required (use upper-end rates)";
+
+  const equipmentLabel =
+    ctx.equipment === "contractor_owned" ? "Contractor owns most equipment (exclude hire premium)" :
+    "Most plant and equipment hired in (include plant hire margin in rates)";
+
+  return `
+SITE-SPECIFIC CONTEXT — adjust all rates accordingly:
+- Province: ${ctx.province}
+- Site accessibility: ${accessibilityLabel}
+- Labour: ${labourLabel}
+- Equipment: ${equipmentLabel}
+- Target overhead & profit margin: ${ctx.marginPct}% (apply this markup on top of base rates)
+
+Apply these adjustments consistently across all items. Transport-sensitive items (materials, concrete, steel) are most affected by accessibility.`.trim();
+}
+
 /**
  * Parses an Excel BOQ (provided as CSV text) and fills missing rates
- * using Zambian construction market rates.
+ * using Zambian construction market rates, optionally adjusted for site context.
  */
-export async function fillBOQRates(csvText: string): Promise<BOQDocument> {
+export async function fillBOQRates(csvText: string, rateContext?: RateContext): Promise<BOQDocument> {
+  const contextBlock = rateContext ? `\n\n${buildRateContextBlock(rateContext)}` : "";
   const truncated = csvText.length > 60000 ? csvText.slice(0, 60000) + "\n...[truncated]" : csvText;
 
   const raw = await generateStructuredContent<BOQDocument>({
@@ -1040,7 +1075,7 @@ export async function fillBOQRates(csvText: string): Promise<BOQDocument> {
     temperature: 0.1,
     systemInstruction: `You are a senior quantity surveyor parsing an Excel Bill of Quantities and filling missing rates.
 
-${RATES_INSTRUCTION}
+${RATES_INSTRUCTION}${contextBlock}
 
 PARSING RULES:
 1. Parse the spreadsheet data into a structured BOQDocument JSON.

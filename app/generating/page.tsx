@@ -54,10 +54,12 @@ function GeneratingContent() {
 
         if (isRateBoq) {
           setStatusText("AI is parsing your BOQ and filling in rates...");
+          const rateContextRaw = localStorage.getItem("boq_rate_context");
+          const rateContext = rateContextRaw ? JSON.parse(rateContextRaw) : undefined;
           res = await fetch("/api/rate-boq", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ session_id: sessionId }),
+            body: JSON.stringify({ session_id: sessionId, rate_context: rateContext }),
           });
         } else {
           const text = localStorage.getItem("boq_text");
@@ -120,6 +122,7 @@ function GeneratingContent() {
         localStorage.removeItem("boq_sow_confidence");
         localStorage.removeItem("boq_document_type");
         localStorage.removeItem("boq_sow_flags");
+        localStorage.removeItem("boq_rate_context");
 
         if (boq_id) {
           router.push(`/boq/${boq_id}`);
