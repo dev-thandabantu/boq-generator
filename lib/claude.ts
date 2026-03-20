@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
+import { logger } from "@/lib/logger";
 import type {
   BOQArtifacts,
   BOQDocument,
@@ -704,7 +705,7 @@ ${preview}`,
 
     return heuristic.confidence >= (llm.confidence ?? 0.5) ? heuristic : llm;
   } catch (error) {
-    console.warn("validateSOW falling back to heuristic classification:", error);
+    logger.warn("validateSOW falling back to heuristic classification", { error: String(error) });
     return heuristic;
   }
 }
@@ -770,7 +771,7 @@ export async function scoreBOQ(boq: import("./types").BOQDocument): Promise<{
     });
     return mergeQAScores(deterministic, llm);
   } catch (error) {
-    console.warn("Falling back to deterministic QA score:", error);
+    logger.warn("Falling back to deterministic QA score", { error: String(error) });
     return deterministic;
   }
 }

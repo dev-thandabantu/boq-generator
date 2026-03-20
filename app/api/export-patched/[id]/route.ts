@@ -1,3 +1,4 @@
+import { logger } from "@/lib/logger";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { patchExcelWithRates } from "@/lib/excel";
@@ -76,7 +77,7 @@ export async function GET(
       },
     });
   } catch (err) {
-    console.error("export-patched error:", err);
+    logger.error("export-patched error", { error: err instanceof Error ? err.message : String(err), route: "export-patched" });
     return NextResponse.json({ error: "Export failed" }, { status: 500 });
   }
 }

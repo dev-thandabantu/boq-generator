@@ -1,9 +1,11 @@
+import { logger } from "@/lib/logger";
 import { NextRequest, NextResponse } from "next/server";
 import type { BOQDocument } from "@/lib/types";
 import { createClient } from "@/lib/supabase/server";
 import { proposeBOQEditWithAI } from "@/lib/boq-assistant";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 function classifyAssistantError(message: string): { status: number; safeMessage: string } {
   const lower = message.toLowerCase();
@@ -107,7 +109,7 @@ export async function POST(
 
     return NextResponse.json({ summary, proposed_boq, diff });
   } catch (err) {
-    console.error("BOQ assistant error:", err);
+    logger.error("BOQ assistant error", { error: err instanceof Error ? err.message : String(err), route: "assistant" });
     const message = err instanceof Error ? err.message : "Unknown error";
     const classified = classifyAssistantError(message);
     return NextResponse.json({ error: classified.safeMessage }, { status: classified.status });

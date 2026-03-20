@@ -1,3 +1,4 @@
+import { logger } from "@/lib/logger";
 import { NextRequest, NextResponse } from "next/server";
 import { getStripe } from "@/lib/stripe";
 import { createClient } from "@/lib/supabase/server";
@@ -64,7 +65,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ url: session.url });
   } catch (err) {
-    console.error("Checkout session error:", err);
+    logger.error("Checkout session error", { error: err instanceof Error ? err.message : String(err), route: "checkout" });
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });
   }
