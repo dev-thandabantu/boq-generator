@@ -1,3 +1,4 @@
+import { logger } from "@/lib/logger";
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import mammoth from "mammoth";
@@ -220,7 +221,7 @@ export async function POST(req: NextRequest) {
       sowFlags,
     });
   } catch (err) {
-    console.error("Extraction error:", err);
+    logger.error("Extraction error", { error: err instanceof Error ? err.message : String(err), route: "extract" });
     return NextResponse.json(
       { error: "Failed to extract text from the document. Please try again." },
       { status: 500 }

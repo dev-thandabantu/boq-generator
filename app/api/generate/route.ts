@@ -3,6 +3,8 @@ import { generateBOQ, validateSOW } from "@/lib/claude";
 import type { GenerationInputDocument } from "@/lib/claude";
 import { getStripe } from "@/lib/stripe";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
+import { logger } from "@/lib/logger";
+import { trackEvent } from "@/lib/analytics";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -116,7 +118,7 @@ export async function POST(req: NextRequest) {
     // Resolve DB client early so we can use it for idempotency check
     const hasServiceRole = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
     if (!hasServiceRole) {
-      console.warn("[generate] SUPABASE_SERVICE_ROLE_KEY not set; falling back to user-scoped inserts");
+      logger.warn("SUPABASE_SERVICE_ROLE_KEY not set; falling back to user-scoped inserts", { route: "generate" });
     }
     const dbClient = hasServiceRole ? createServiceClient() : supabase;
 
@@ -163,7 +165,7 @@ export async function POST(req: NextRequest) {
         .single();
 
       if (dbError) {
-        console.error("Failed to save BOQ to DB:", dbError);
+        logger.error("Failed to save BOQ to DB", { error: String(dbError), route: "generate" });
         return NextResponse.json({ boq, boq_id: null });
       }
 
@@ -183,13 +185,15 @@ export async function POST(req: NextRequest) {
       );
 
       
+      const itemCount = boq.bills?.flatMap((b) => b.items).filter((i) => !i.is_header).length ?? 0;
+      trackEvent(user.id, "boq_generated", { boqId: saved.id, title, itemCount });
       return NextResponse.json({ boq, boq_id: saved.id });
     } catch (saveErr) {
-      console.error("Failed to save BOQ or record payment:", saveErr);
+      logger.error("Failed to save BOQ or record payment", { error: String(saveErr), route: "generate" });
       return NextResponse.json({ boq, boq_id: null });
     }
   } catch (err) {
-    console.error("BOQ generation error:", err);
+    logger.error("BOQ generation error", { error: err instanceof Error ? err.message : String(err), route: "generate" });
     const message = err instanceof Error ? err.message : "Unknown error";
     
     const isExtractionFailure =

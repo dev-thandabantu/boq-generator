@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getStripe } from "@/lib/stripe";
 import { createServiceClient } from "@/lib/supabase/server";
 import Stripe from "stripe";
+import { logger } from "@/lib/logger";
+import { trackEvent } from "@/lib/analytics";
 
 export const runtime = "nodejs";
 
@@ -17,13 +19,13 @@ export async function POST(req: NextRequest) {
       event = getStripe().webhooks.constructEvent(body, sig, webhookSecret);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Webhook error";
-      console.error("[webhook] Signature verification failed:", msg);
+      logger.error("Webhook signature verification failed", { error: msg, route: "webhook" });
       return NextResponse.json({ error: msg }, { status: 400 });
     }
   } else {
     // Webhook secret not yet configured — parse without verification
     // (safe for initial setup; add STRIPE_WEBHOOK_SECRET to fully secure)
-    console.warn("[webhook] STRIPE_WEBHOOK_SECRET not set — skipping verification");
+    logger.warn("STRIPE_WEBHOOK_SECRET not set — skipping verification", { route: "webhook" });
     try {
       event = JSON.parse(body) as Stripe.Event;
     } catch {
@@ -34,9 +36,7 @@ export async function POST(req: NextRequest) {
   if (event.type === "checkout.session.completed") {
     const session = event.data.object as Stripe.Checkout.Session;
     if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-      console.error(
-        "[webhook] SUPABASE_SERVICE_ROLE_KEY is not configured; cannot persist payment"
-      );
+      logger.error("SUPABASE_SERVICE_ROLE_KEY is not configured; cannot persist payment", { route: "webhook" });
       return NextResponse.json(
         { error: "SUPABASE_SERVICE_ROLE_KEY is not configured" },
         { status: 500 }
@@ -74,7 +74,14 @@ export async function POST(req: NextRequest) {
         .eq("stripe_session_id", session.id);
     }
 
-    console.log(`[webhook] Payment recorded for session ${session.id}`);
+    logger.info("Payment recorded", { sessionId: session.id, route: "webhook" });
+    if (userId) {
+      trackEvent(userId, "payment_completed", {
+        amountCents: session.amount_total,
+        currency: session.currency,
+        type: session.metadata?.type ?? "generate_boq",
+      });
+    }
   }
 
   return NextResponse.json({ received: true });

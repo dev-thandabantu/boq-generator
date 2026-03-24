@@ -1,9 +1,11 @@
+import { logger } from "@/lib/logger";
 import { NextRequest } from "next/server";
 import type { BOQDocument } from "@/lib/types";
 import { createClient } from "@/lib/supabase/server";
 import { proposeBOQEditWithAI, streamAssistantSummary } from "@/lib/boq-assistant";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 function sse(event: string, data: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -132,7 +134,7 @@ export async function POST(
         });
         write("done", { ok: true });
       } catch (err) {
-        console.error("BOQ assistant stream error:", err);
+        logger.error("BOQ assistant stream error", { error: err instanceof Error ? err.message : String(err), route: "assistant-stream" });
         const message = err instanceof Error ? err.message : "Unknown error";
         const classified = classifyAssistantError(message);
         write("error", { message: classified.safeMessage, status: classified.status });

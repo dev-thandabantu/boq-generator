@@ -3,6 +3,8 @@ import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { validateBOQ } from "@/lib/claude";
 import { excelToCSV } from "@/lib/excel";
 import { randomUUID } from "crypto";
+import { logger } from "@/lib/logger";
+import { trackEvent } from "@/lib/analytics";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -89,13 +91,17 @@ export async function POST(req: NextRequest) {
       });
 
     if (uploadError) {
-      console.error("Storage upload error:", uploadError);
+      logger.error("Storage upload error", { error: String(uploadError), route: "ingest-boq" });
       return NextResponse.json(
         { error: "Failed to store the uploaded file. Please try again." },
         { status: 500 }
       );
     }
 
+    trackEvent(user.id, "excel_ingested", {
+      totalItems: validation.totalItems,
+      missingRateCount: validation.missingRateCount,
+    });
     return NextResponse.json({
       storageKey,
       preview: {
@@ -106,7 +112,7 @@ export async function POST(req: NextRequest) {
       },
     });
   } catch (err) {
-    console.error("ingest-boq error:", err);
+    logger.error("ingest-boq error", { error: err instanceof Error ? err.message : String(err), route: "ingest-boq" });
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });
   }

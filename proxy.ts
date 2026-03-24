@@ -1,5 +1,30 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { Ratelimit } from "@upstash/ratelimit";
+import { Redis } from "@upstash/redis";
+
+// Lazy-initialise rate limiter only when Upstash env vars are present.
+// Falls back gracefully in local dev (no Upstash required).
+let _ratelimit: Ratelimit | null = null;
+function getRatelimit(): Ratelimit | null {
+  if (_ratelimit) return _ratelimit;
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return null;
+  _ratelimit = new Ratelimit({
+    redis: new Redis({ url, token }),
+    limiter: Ratelimit.slidingWindow(10, "15 m"),
+    analytics: false,
+  });
+  return _ratelimit;
+}
+
+const RATE_LIMITED_ROUTES = [
+  "/api/generate",
+  "/api/rate-boq",
+  "/api/ingest-boq",
+  "/api/extract",
+];
 
 export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
@@ -32,7 +57,7 @@ export async function proxy(request: NextRequest) {
 
   const { pathname } = request.nextUrl;
 
-  // Always allow: landing page, auth pages, policy pages, webhooks, static assets
+  // Always allow: landing page, auth pages, policy pages, webhooks, Sentry tunnel, health check
   if (
     pathname === "/" ||
     pathname.startsWith("/login") ||
@@ -40,9 +65,28 @@ export async function proxy(request: NextRequest) {
     pathname.startsWith("/privacy") ||
     pathname.startsWith("/terms") ||
     pathname.startsWith("/contact") ||
-    pathname.startsWith("/api/webhooks/")
+    pathname.startsWith("/api/webhooks/") ||
+    pathname.startsWith("/api/health") ||
+    pathname.startsWith("/monitoring")
   ) {
     return supabaseResponse;
+  }
+
+  // Rate limit AI-heavy routes
+  if (RATE_LIMITED_ROUTES.some((r) => pathname.startsWith(r))) {
+    const rl = getRatelimit();
+    if (rl) {
+      const ip =
+        request.headers.get("x-forwarded-for")?.split(",")[0].trim() ??
+        "unknown";
+      const { success } = await rl.limit(ip);
+      if (!success) {
+        return NextResponse.json(
+          { error: "Too many requests. Please wait a moment before trying again." },
+          { status: 429 }
+        );
+      }
+    }
   }
 
   // Require auth for everything else

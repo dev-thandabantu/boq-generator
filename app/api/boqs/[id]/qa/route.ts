@@ -1,3 +1,4 @@
+import { logger } from "@/lib/logger";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { scoreBOQ } from "@/lib/claude";
@@ -41,7 +42,7 @@ export async function POST(
     try {
       qa = await scoreBOQ(boqData);
     } catch (error) {
-      console.warn("QA route falling back to deterministic score:", error);
+      logger.warn("QA route falling back to deterministic score", { error: String(error), route: "qa" });
     }
 
     // Persist the score back into the data JSON
@@ -53,7 +54,7 @@ export async function POST(
 
     return NextResponse.json({ qa });
   } catch (err) {
-    console.error("QA scoring error:", err);
+    logger.error("QA scoring error", { error: err instanceof Error ? err.message : String(err), route: "qa" });
     return NextResponse.json({ error: "Scoring failed" }, { status: 500 });
   }
 }
