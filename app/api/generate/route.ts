@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateBOQ, validateSOW } from "@/lib/claude";
+import type { GenerationInputDocument } from "@/lib/claude";
 import { getStripe } from "@/lib/stripe";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { logger } from "@/lib/logger";
@@ -43,20 +44,34 @@ function classifyGenerateError(message: string): { status: number; safeMessage: 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { text, session_id, suggest_rates } = body as {
-      text: string;
+    const { text, documents, session_id, suggest_rates } = body as {
+      text?: string;
+      documents?: GenerationInputDocument[];
       session_id: string;
       suggest_rates?: boolean;
       is_sow?: boolean;
       sow_warning?: string;
       document_type?: string;
+      should_block_generation?: boolean;
     };
+    const primaryDocument =
+      documents?.find((doc) => doc.role === "primary") ??
+      (typeof text === "string"
+        ? {
+            document_id: "primary",
+            name: "Primary SOW",
+            role: "primary" as const,
+            document_type: "construction_sow" as const,
+            text,
+            pages: null,
+          }
+        : null);
 
-    if (!text || typeof text !== "string") {
-      return NextResponse.json({ error: "text is required" }, { status: 400 });
+    if (!primaryDocument || typeof primaryDocument.text !== "string") {
+      return NextResponse.json({ error: "primary document text is required" }, { status: 400 });
     }
 
-    if (text.length < 50) {
+    if (primaryDocument.text.length < 50) {
       return NextResponse.json(
         { error: "Text too short — could not extract meaningful content from PDF" },
         { status: 400 }
@@ -67,9 +82,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Payment required" }, { status: 402 });
     }
 
-    const validation = await validateSOW(text);
+    const supportingDocsCount = (documents ?? []).filter((doc) => doc.role === "supporting").length;
+    const validation = await validateSOW(primaryDocument.text, { supportingDocsCount });
     const clientSaysNotSOW = body.is_sow === false;
-    if (!validation.isSOW || clientSaysNotSOW) {
+    if (!validation.isSOW || validation.should_block_generation || clientSaysNotSOW || body.should_block_generation) {
       const reason =
         validation.reason ||
         body.sow_warning ||
@@ -118,10 +134,21 @@ export async function POST(req: NextRequest) {
     }
 
     // Truncate to ~80k chars to stay within token limits
-    const truncated =
-      text.length > 80000 ? text.slice(0, 80000) + "\n...[truncated]" : text;
+    const truncatedDocuments = (documents ?? [primaryDocument]).map((doc) => ({
+      ...doc,
+      text:
+        doc.text.length > 80000
+          ? doc.text.slice(0, 80000) + "\n...[truncated]"
+          : doc.text,
+    }));
 
-    const boq = await generateBOQ(truncated, { suggestRates: suggest_rates ?? false });
+    const boq = await generateBOQ(
+      { documents: truncatedDocuments },
+      {
+        suggestRates: suggest_rates ?? false,
+        documentClassification: validation,
+      }
+    );
 
     const title = boq.project || "Untitled BOQ";
 

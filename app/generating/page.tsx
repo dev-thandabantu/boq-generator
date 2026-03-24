@@ -62,8 +62,10 @@ function GeneratingContent() {
             body: JSON.stringify({ session_id: sessionId, rate_context: rateContext }),
           });
         } else {
+          const bundleRaw = localStorage.getItem("boq_document_bundle");
           const text = localStorage.getItem("boq_text");
-          if (!text) {
+          const documents = bundleRaw ? JSON.parse(bundleRaw) : null;
+          if (!text && !documents?.length) {
             setError(
               "Your session expired. If you were charged, please contact us with your payment reference."
             );
@@ -73,6 +75,7 @@ function GeneratingContent() {
           const isSOW = localStorage.getItem("boq_is_sow") !== "0";
           const sowWarning = localStorage.getItem("boq_sow_warning") || null;
           const documentType = localStorage.getItem("boq_document_type") || null;
+          const shouldBlockGeneration = localStorage.getItem("boq_should_block_generation") === "1";
 
           setStatusText("AI is reading your Scope of Work and extracting bill items...");
           res = await fetch("/api/generate", {
@@ -80,11 +83,13 @@ function GeneratingContent() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               text,
+              documents,
               session_id: sessionId,
               suggest_rates: suggestRates,
               is_sow: isSOW,
               sow_warning: sowWarning,
               document_type: documentType,
+              should_block_generation: shouldBlockGeneration,
             }),
           });
         }
@@ -122,12 +127,18 @@ function GeneratingContent() {
         // Clean up localStorage
         localStorage.removeItem("boq_type");
         localStorage.removeItem("boq_text");
+        localStorage.removeItem("boq_document_bundle");
         localStorage.removeItem("boq_suggest_rates");
         localStorage.removeItem("boq_is_sow");
         localStorage.removeItem("boq_sow_warning");
         localStorage.removeItem("boq_sow_confidence");
         localStorage.removeItem("boq_document_type");
+        localStorage.removeItem("boq_should_block_generation");
+        localStorage.removeItem("boq_positive_signals");
+        localStorage.removeItem("boq_negative_signals");
         localStorage.removeItem("boq_sow_flags");
+        localStorage.removeItem("boq_required_attachments");
+        localStorage.removeItem("boq_source_bundle_status");
         localStorage.removeItem("boq_rate_context");
 
         if (boq_id) {

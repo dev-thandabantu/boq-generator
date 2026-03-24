@@ -1,20 +1,145 @@
 import { logger } from "@/lib/logger";
 import { NextRequest, NextResponse } from "next/server";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import mammoth from "mammoth";
 import { validateSOW } from "@/lib/claude";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const pdfParse = require("pdf-parse") as (buffer: Buffer) => Promise<{ text: string; numpages: number }>;
+const pdfParse = require("pdf-parse") as (
+  buffer: Buffer,
+  options?: { pagerender?: (pageData: { getTextContent: (opts: object) => Promise<{ items: Array<{ str: string; transform: number[] }> }> }) => Promise<string> }
+) => Promise<{ text: string; numpages: number }>;
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const MAX_SIZE = 15 * 1024 * 1024; // 15 MB
+const MIN_DIRECT_TEXT_LENGTH = 120;
+const GEMINI_VISION_MODELS = [
+  process.env.GEMINI_MODEL_FALLBACK,
+  process.env.GEMINI_MODEL_PRIMARY,
+  "gemini-2.5-flash",
+].filter(Boolean) as string[];
+
+function getVisionClient() {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("GEMINI_API_KEY is not configured");
+  return new GoogleGenerativeAI(key);
+}
+
+async function extractPdfTextWithVision(buffer: Buffer, filename: string) {
+  const client = getVisionClient();
+  let lastError: unknown;
+
+  for (const modelName of Array.from(new Set(GEMINI_VISION_MODELS))) {
+    try {
+      const model = client.getGenerativeModel({
+        model: modelName,
+        systemInstruction:
+          "You extract visible text and drawing labels from scanned construction PDFs. Return plain text only. Preserve page order, dimensions, room names, notes, legends, schedules, and title-block details when visible. Do not add commentary.",
+        generationConfig: {
+          temperature: 0,
+        },
+      });
+
+      const result = await model.generateContent([
+        {
+          text:
+            "Extract all readable visible text from this PDF. This may be a construction drawing or scanned document. Return plain text only. Include page markers like [PAGE 1]. If text is sparse, still return whatever labels, dimensions, title block fields, schedules, callouts, and notes are visible.",
+        },
+        {
+          inlineData: {
+            mimeType: "application/pdf",
+            data: buffer.toString("base64"),
+          },
+        },
+      ]);
+
+      const text = result.response.text().trim();
+      if (text.length > 0) {
+        return text;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`Vision extraction failed for ${filename}`);
+}
+
+function enrichDrawingText(text: string): string {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const drawingLike = lines.filter(
+    (line) =>
+      /\b(?:drawing|layout|elevation|section|detail|grid|room|classroom|office|parking|pool|gate|road|walkway|drain|toilet|store|lab|library|ablution|seating)\b/i.test(
+        line
+      ) ||
+      /\b\d+(?:\.\d+)?\s*(?:m|mm)\b/i.test(line)
+  );
+
+  const labelLike = drawingLike.filter((line) => line.length <= 80);
+  const countSummary = new Map<string, number>();
+  for (const label of labelLike) {
+    const key = label.toLowerCase();
+    countSummary.set(key, (countSummary.get(key) ?? 0) + 1);
+  }
+
+  const repeatedLabels = Array.from(countSummary.entries())
+    .filter(([, count]) => count > 1)
+    .slice(0, 20)
+    .map(([label, count]) => `LABEL COUNT: ${label} :: ${count}`);
+
+  if (drawingLike.length === 0 && repeatedLabels.length === 0) {
+    return text;
+  }
+
+  return [
+    text,
+    "",
+    "[DRAWING TEXT SUMMARY]",
+    ...drawingLike.slice(0, 60),
+    ...repeatedLabels,
+  ].join("\n");
+}
+
+function createPageRender() {
+  let pageNumber = 0;
+  return async (pageData: {
+    getTextContent: (opts: object) => Promise<{ items: Array<{ str: string; transform: number[] }> }>;
+  }) => {
+    pageNumber += 1;
+    const textContent = await pageData.getTextContent({
+      normalizeWhitespace: true,
+      disableCombineTextItems: false,
+    });
+
+    let lastY: number | undefined;
+    let text = `\n[PAGE ${pageNumber}]\n`;
+
+    for (const item of textContent.items) {
+      if (lastY === item.transform[5] || typeof lastY === "undefined") {
+        text += item.str;
+      } else {
+        text += `\n${item.str}`;
+      }
+      lastY = item.transform[5];
+    }
+
+    return `${text}\n`;
+  };
+}
 
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
     const file = formData.get("file") as File | null;
+    const supportingDocsCount = Number(formData.get("supporting_docs_count") ?? 0);
 
     if (!file) {
       return NextResponse.json({ error: "No file provided" }, { status: 400 });
@@ -46,9 +171,23 @@ export async function POST(req: NextRequest) {
       if (buffer[0] !== 0x25 || buffer[1] !== 0x50) {
         return NextResponse.json({ error: "Invalid PDF file" }, { status: 400 });
       }
-      const data = await pdfParse(buffer);
+      const data = await pdfParse(buffer, { pagerender: createPageRender() });
       text = data.text;
       pages = data.numpages;
+
+      const trimmedText = text.trim();
+      if (trimmedText.length < MIN_DIRECT_TEXT_LENGTH) {
+        try {
+          const visionText = await extractPdfTextWithVision(buffer, file.name);
+          if (visionText.trim().length > trimmedText.length) {
+            text = enrichDrawingText(visionText);
+          }
+        } catch (visionError) {
+          console.warn("Vision fallback extraction failed:", visionError);
+        }
+      } else if (/drawing|layout|elevation|section|detail/i.test(text)) {
+        text = enrichDrawingText(text);
+      }
     } else {
       // .docx via mammoth
       const result = await mammoth.extractRawText({ buffer });
@@ -72,16 +211,38 @@ export async function POST(req: NextRequest) {
     let sowWarning: string | null = null;
     let sowConfidence: number | null = null;
     let documentType: string | null = null;
+    let shouldBlockGeneration = false;
+    let positiveSignals: string[] = [];
+    let negativeSignals: string[] = [];
     let sowFlags: string[] = [];
     try {
-      const validation = await validateSOW(text);
+      const validation = await validateSOW(text, { supportingDocsCount });
       isSOW = validation.isSOW;
       sowConfidence = validation.confidence;
       documentType = validation.documentType;
+      shouldBlockGeneration = validation.should_block_generation;
+      const requiredAttachments = validation.required_attachments ?? [];
+      const sourceBundleStatus = validation.source_bundle_status ?? "complete";
+      positiveSignals = validation.positive_signals ?? [];
+      negativeSignals = validation.negative_signals ?? [];
       sowFlags = validation.flags ?? [];
       if (!isSOW) {
         sowWarning = validation.reason;
       }
+      return NextResponse.json({
+        text,
+        pages,
+        isSOW,
+        sowWarning,
+        sowConfidence,
+        documentType,
+        shouldBlockGeneration,
+        requiredAttachments,
+        sourceBundleStatus,
+        positiveSignals,
+        negativeSignals,
+        sowFlags,
+      });
     } catch {
       // Non-fatal — proceed without validation result
     }
@@ -93,6 +254,11 @@ export async function POST(req: NextRequest) {
       sowWarning,
       sowConfidence,
       documentType,
+      shouldBlockGeneration,
+      requiredAttachments: [],
+      sourceBundleStatus: "complete",
+      positiveSignals,
+      negativeSignals,
       sowFlags,
     });
   } catch (err) {

@@ -31,6 +31,24 @@ interface AssistantPreview {
   diff: AssistantDiff;
 }
 
+function unresolvedPlaceholder(item: BOQItem): string | null {
+  if (item.note === "Incl") return "Incl";
+  if (item.qty === null && item.rate === null) return "TO BE COMPLETED";
+  return null;
+}
+
+function getSourceUsage(boq: BOQDocument) {
+  const counts = new Map<string, number>();
+  for (const bill of boq.bills) {
+    for (const item of bill.items) {
+      if (item.is_header) continue;
+      const key = item.source_document || "primary-or-unknown";
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+  return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+}
+
 export default function BOQPage() {
   const router = useRouter();
   const { id } = useParams<{ id: string }>();
@@ -534,6 +552,31 @@ export default function BOQPage() {
               </div>
             )}
 
+            {process.env.NODE_ENV !== "production" && (
+              <div className="rounded-xl border border-sky-400/30 bg-sky-500/[0.08] p-4 text-sm space-y-3">
+                <div>
+                  <p className="text-sky-200 font-semibold">Source Debug</p>
+                  <p className="text-sky-50 mt-1">
+                    Bundle status: {boq.quality_summary?.source_bundle_status ?? boq.document_classification?.source_bundle_status ?? "unknown"}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2 text-[11px]">
+                  {(boq.source_bundle ?? []).map((doc) => (
+                    <span key={doc.document_id} className="rounded bg-white/10 px-2 py-1 text-gray-100">
+                      {doc.document_id} · {doc.role} · {doc.document_type} · {doc.name}
+                    </span>
+                  ))}
+                </div>
+                <div className="space-y-1">
+                  {getSourceUsage(boq).map(([source, count]) => (
+                    <p key={source} className="text-[11px] text-gray-100">
+                      {source}: {count} item{count === 1 ? "" : "s"}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {boq.bills.map((bill, billIdx) => (
               <BillSection
                 key={billIdx}
@@ -960,8 +1003,20 @@ function ItemRow({
   onRemove: () => void;
 }) {
   const amount = item.amount ?? (item.qty !== null && item.rate !== null ? item.qty * item.rate : null);
+  const placeholder = unresolvedPlaceholder(item);
+  const displayNote = item.note && item.note !== "Incl" ? item.note : null;
   const unresolvedQty = item.qty == null;
   const lowConfidence = (item.quantity_confidence ?? 0.4) < 0.6;
+  const evidenceLabel =
+    item.evidence_type === "derived_calculation"
+      ? "Derived"
+      : item.evidence_type === "tabulated_scope"
+      ? "Table"
+      : item.evidence_type === "metadata_only"
+      ? "Metadata"
+      : item.evidence_type === "quoted_scope"
+      ? "Quoted"
+      : null;
 
   if (item.is_header) {
     return (
@@ -1005,7 +1060,43 @@ function ItemRow({
               Low conf {((item.quantity_confidence ?? 0.4) * 100).toFixed(0)}%
             </span>
           )}
+          {evidenceLabel && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-400/20 text-sky-100">
+              {evidenceLabel} evidence
+            </span>
+          )}
+          {item.source_anchor && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-gray-100">
+              {item.source_anchor}
+            </span>
+          )}
+          {item.source_document && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-400/20 text-violet-100">
+              {item.source_document}
+            </span>
+          )}
         </div>
+        {(item.source_excerpt || item.derivation_note || displayNote) && (
+          <div className="mt-1.5 rounded-md border border-white/10 bg-white/[0.03] px-2 py-1.5">
+            {item.source_excerpt && (
+              <p className="text-[10px] text-gray-200 leading-relaxed">
+                {item.source_excerpt.length > 180
+                  ? `${item.source_excerpt.slice(0, 177)}...`
+                  : item.source_excerpt}
+              </p>
+            )}
+            {item.derivation_note && (
+              <p className="text-[10px] text-sky-200 mt-1">
+                Derivation: {item.derivation_note}
+              </p>
+            )}
+            {displayNote && (
+              <p className="text-[10px] text-amber-100 mt-1">
+                Note: {displayNote}
+              </p>
+            )}
+          </div>
+        )}
       </td>
       <td className="px-2 py-1.5 text-center">
         <input
@@ -1036,10 +1127,12 @@ function ItemRow({
         />
       </td>
       <td className="px-2 py-1.5 text-right font-mono text-gray-100">
-        {item.note ? (
+        {item.note === "Incl" ? (
           <span className="text-gray-200 italic">{item.note}</span>
         ) : amount !== null ? (
           amount.toLocaleString("en-ZM", { minimumFractionDigits: 2 })
+        ) : placeholder ? (
+          <span className="text-gray-300 italic">{placeholder}</span>
         ) : (
           <span className="text-gray-300">—</span>
         )}
@@ -1078,6 +1171,15 @@ function QABadge({ qa }: { qa: import("@/lib/types").BOQQualityScore }) {
       {open && (
         <div className="absolute right-0 top-full mt-2 w-72 rounded-xl border border-white/15 bg-[#1a1f28] p-4 shadow-xl z-30 space-y-2">
           <p className="text-xs font-semibold text-white">{qa.summary}</p>
+          {qa.subscores && (
+            <div className="space-y-2 pt-1">
+              <QASubscoreRow label="Coverage" value={qa.subscores.coverage} />
+              <QASubscoreRow label="Source" value={qa.subscores.source_completeness} />
+              <QASubscoreRow label="Field integrity" value={qa.subscores.field_integrity} />
+              <QASubscoreRow label="Evidence" value={qa.subscores.evidence_traceability} />
+              <QASubscoreRow label="Semantics" value={qa.subscores.boq_semantics} />
+            </div>
+          )}
           {qa.flags.length > 0 && (
             <ul className="space-y-1 mt-2">
               {qa.flags.map((flag, i) => (
@@ -1094,6 +1196,23 @@ function QABadge({ qa }: { qa: import("@/lib/types").BOQQualityScore }) {
           <button onClick={() => setOpen(false)} className="text-xs text-gray-200 hover:text-white pt-1">Dismiss</button>
         </div>
       )}
+    </div>
+  );
+}
+
+function QASubscoreRow({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-[11px] text-gray-200">
+        <span>{label}</span>
+        <span className="font-mono text-white">{value.toFixed(1)}/10</span>
+      </div>
+      <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
+        <div
+          className="h-full rounded-full bg-amber-300"
+          style={{ width: `${Math.max(8, Math.min(100, value * 10))}%` }}
+        />
+      </div>
     </div>
   );
 }
