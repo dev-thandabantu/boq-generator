@@ -792,6 +792,23 @@ function countLabelMatches(text: string, description: string): { count: number; 
   return { count, excerpt };
 }
 
+function supportingDocsSatisfyRequirements(
+  documents: GenerationInputDocument[],
+  requiredAttachments: RequiredAttachment[]
+): boolean {
+  const supportingTypes = new Set(
+    documents
+      .filter((doc) => doc.role === "supporting")
+      .map((doc) => String(doc.document_type || "").toLowerCase())
+  );
+
+  return requiredAttachments.every((attachment) => {
+    const type = attachment.type.toLowerCase();
+    if (type === "unknown") return supportingTypes.size > 0;
+    return supportingTypes.has(type) || supportingTypes.has(`${type}s`);
+  });
+}
+
 function applyDrawingCountHeuristics(
   structure: BOQStructureArtifact,
   quantities: QuantityPassResponse,
@@ -835,7 +852,7 @@ function applyDrawingCountHeuristics(
         qty: best.count,
         unit: item.unit ?? (meta.unit && meta.unit !== "Item" ? meta.unit : "No."),
         quantity_source: "derived",
-        quantity_confidence: 0.55,
+        quantity_confidence: 0.72,
         source_excerpt: best.excerpt ?? item.source_excerpt ?? null,
         source_anchor: item.source_anchor ?? "Drawing label count",
         source_document: best.docId ?? item.source_document ?? null,
@@ -1534,7 +1551,16 @@ export async function generateBOQ(
   const boq = mergeStructureAndQuantities(
     structure,
     quantitiesRaw,
-    opts?.documentClassification,
+    opts?.documentClassification
+      ? {
+          ...opts.documentClassification,
+          source_bundle_status:
+            opts.documentClassification.required_attachments.length > 0 &&
+            supportingDocsSatisfyRequirements(documents, opts.documentClassification.required_attachments)
+              ? "complete"
+              : opts.documentClassification.source_bundle_status,
+        }
+      : undefined,
     buildSourceBundle(documents)
   );
   if (opts?.suggestRates) {

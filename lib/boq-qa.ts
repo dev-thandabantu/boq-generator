@@ -60,6 +60,9 @@ export function computeDeterministicQA(boq: BOQDocument): BOQQualityScore {
   const evidenceBacked = items.filter(
     (item) => item.qty !== null && (item.source_excerpt?.trim().length ?? 0) >= 12
   ).length;
+  const supportingDocUsage = items.filter(
+    (item) => item.source_document && item.source_document !== "primary-1"
+  ).length;
   const shortDescriptions = items.filter((item) => item.description.trim().length < 12).length;
   const itemUnitRows = items.filter((item) => item.unit === "Item" || item.unit === "LS").length;
   const nonBOQSemanticItems = items.filter((item) => looksLikeNonBOQItem(item.description)).length;
@@ -80,6 +83,9 @@ export function computeDeterministicQA(boq: BOQDocument): BOQQualityScore {
   if (lowConfidence > 0) flags.push(`${lowConfidence} items have low quantity confidence.`);
   if (measuredItems > 0 && evidenceBacked < measuredItems) {
     flags.push(`${measuredItems - evidenceBacked} measured items are missing source evidence.`);
+  }
+  if (supportingDocUsage > 0) {
+    flags.push(`${supportingDocUsage} items are using supporting-document evidence.`);
   }
   if (shortDescriptions > 0) flags.push(`${shortDescriptions} descriptions are too short or vague.`);
   if (totalItems > 0 && itemUnitRows / totalItems > 0.55) {
@@ -103,6 +109,7 @@ export function computeDeterministicQA(boq: BOQDocument): BOQQualityScore {
   if (measuredItems > 0 && evidenceBacked < measuredItems) {
     score -= Math.min(1.8, (measuredItems - evidenceBacked) * 0.15);
   }
+  if (supportingDocUsage > 0) score += Math.min(0.8, supportingDocUsage * 0.08);
   if (shortDescriptions > 0) score -= Math.min(1.2, shortDescriptions * 0.1);
   if (totalItems > 0 && itemUnitRows / totalItems > 0.55) score -= 1.1;
   if (nonBOQSemanticItems > 0) score -= Math.min(4.2, 1.4 + nonBOQSemanticItems * 0.28);
@@ -133,7 +140,8 @@ export function computeDeterministicQA(boq: BOQDocument): BOQQualityScore {
       10 -
         (measuredItems > 0
           ? Math.min(5, (measuredItems - evidenceBacked) * 0.25)
-          : 3)
+          : 3) +
+        Math.min(2, supportingDocUsage * 0.2)
     ),
     boq_semantics: clampScore(
       10 -

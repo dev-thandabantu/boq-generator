@@ -69,6 +69,45 @@ async function extractPdfTextWithVision(buffer: Buffer, filename: string) {
     : new Error(`Vision extraction failed for ${filename}`);
 }
 
+function enrichDrawingText(text: string): string {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const drawingLike = lines.filter(
+    (line) =>
+      /\b(?:drawing|layout|elevation|section|detail|grid|room|classroom|office|parking|pool|gate|road|walkway|drain|toilet|store|lab|library|ablution|seating)\b/i.test(
+        line
+      ) ||
+      /\b\d+(?:\.\d+)?\s*(?:m|mm)\b/i.test(line)
+  );
+
+  const labelLike = drawingLike.filter((line) => line.length <= 80);
+  const countSummary = new Map<string, number>();
+  for (const label of labelLike) {
+    const key = label.toLowerCase();
+    countSummary.set(key, (countSummary.get(key) ?? 0) + 1);
+  }
+
+  const repeatedLabels = Array.from(countSummary.entries())
+    .filter(([, count]) => count > 1)
+    .slice(0, 20)
+    .map(([label, count]) => `LABEL COUNT: ${label} :: ${count}`);
+
+  if (drawingLike.length === 0 && repeatedLabels.length === 0) {
+    return text;
+  }
+
+  return [
+    text,
+    "",
+    "[DRAWING TEXT SUMMARY]",
+    ...drawingLike.slice(0, 60),
+    ...repeatedLabels,
+  ].join("\n");
+}
+
 function createPageRender() {
   let pageNumber = 0;
   return async (pageData: {
@@ -141,11 +180,13 @@ export async function POST(req: NextRequest) {
         try {
           const visionText = await extractPdfTextWithVision(buffer, file.name);
           if (visionText.trim().length > trimmedText.length) {
-            text = visionText;
+            text = enrichDrawingText(visionText);
           }
         } catch (visionError) {
           console.warn("Vision fallback extraction failed:", visionError);
         }
+      } else if (/drawing|layout|elevation|section|detail/i.test(text)) {
+        text = enrichDrawingText(text);
       }
     } else {
       // .docx via mammoth
