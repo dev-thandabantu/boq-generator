@@ -117,6 +117,12 @@ function sanitizeSheetName(name: string): string {
     .trim() || "BOQ";
 }
 
+function unresolvedPlaceholder(item: BOQItem): string {
+  if (item.note === "Incl") return "Incl";
+  if (item.qty === null && item.rate === null) return "TO BE COMPLETED";
+  return "";
+}
+
 export function generateBOQExcel(boq: BOQDocument): Buffer {
   const wb = XLSX.utils.book_new();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -316,8 +322,19 @@ export function generateBOQExcel(boq: BOQDocument): Buffer {
       setCell(row, 2, item.description, itemStyle);
       setCell(row, 3, item.unit || "", { ...numStyle });
       setCell(row, 4, item.qty ?? "", numStyle);
-      setCell(row, 5, item.note ?? (item.rate !== null ? item.rate : ""), item.rate !== null ? currencyStyle : { ...numStyle, alignment: { horizontal: "center", vertical: "top" } });
-      setCell(row, 6, item.note ?? (amount !== null ? amount : ""), amount !== null ? currencyStyle : { ...numStyle, alignment: { horizontal: "center", vertical: "top" } });
+      const placeholder = unresolvedPlaceholder(item);
+      setCell(
+        row,
+        5,
+        item.rate !== null ? item.rate : placeholder,
+        item.rate !== null ? currencyStyle : { ...numStyle, alignment: { horizontal: "center", vertical: "top" } }
+      );
+      setCell(
+        row,
+        6,
+        amount !== null ? amount : placeholder,
+        amount !== null ? currencyStyle : { ...numStyle, alignment: { horizontal: "center", vertical: "top" } }
+      );
       row++;
       blankRow();
     }

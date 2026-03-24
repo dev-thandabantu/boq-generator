@@ -1,28 +1,34 @@
 import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import type {
   BOQArtifacts,
+  BOQDocumentType,
+  BOQEvidenceType,
   BOQDocument,
+  DocumentClassification,
   BOQItem,
   BOQQuantityArtifactItem,
   BOQQualitySummary,
+  RequiredAttachment,
+  RequiredAttachmentType,
+  SourceBundleDocument,
+  SourceBundleStatus,
   BOQStructureArtifact,
   BOQValidationFlag,
 } from "./types";
 import { computeDeterministicQA, mergeQAScores } from "./boq-qa";
 
 type QuantitySource = "explicit" | "derived" | "assumed";
-type DocumentType =
-  | "construction_sow"
-  | "boq_or_cost_document"
-  | "technical_spec_non_construction"
-  | "software_product_spec"
-  | "unknown";
-type SOWValidationResult = {
-  isSOW: boolean;
-  reason: string;
-  confidence: number;
-  documentType: DocumentType;
-  flags: string[];
+type SOWValidationResult = DocumentClassification;
+export type GenerationInputDocument = {
+  document_id: string;
+  name: string;
+  role: "primary" | "supporting";
+  document_type?: BOQDocumentType | RequiredAttachmentType | "supporting_context";
+  text: string;
+  pages?: number | null;
+};
+type GenerationInputBundle = {
+  documents: GenerationInputDocument[];
 };
 
 type StructurePassResponse = {
@@ -38,6 +44,8 @@ type StructurePassResponse = {
       item_no?: string;
       description: string;
       unit?: string;
+      section_context?: string | null;
+      source_excerpt?: string | null;
       is_header?: boolean;
       note?: string | null;
     }>;
@@ -53,6 +61,9 @@ type QuantityPassResponse = {
     quantity_confidence?: number | null;
     source_excerpt?: string | null;
     source_anchor?: string | null;
+    source_document?: string | null;
+    evidence_type?: BOQEvidenceType | string | null;
+    derivation_note?: string | null;
     note?: string | null;
   }>;
 };
@@ -197,6 +208,18 @@ const NON_SOW_ABSTRACT_SECTION_TERMS = [
 ];
 const NON_SOW_PRODUCT_PATTERN =
   /\b(?:dashboard|workflow|admin ui|user story|acceptance criteria|schema|api|configuration-driven|whatsapp)\b/gi;
+const REQUIRED_ATTACHMENT_PATTERNS: Array<{
+  pattern: RegExp;
+  type: RequiredAttachmentType;
+  reason: string;
+}> = [
+  { pattern: /\brefer to (the )?attached boq\b/i, type: "boq", reason: "The SOW explicitly refers to an attached BOQ." },
+  { pattern: /\bunabridged boq attached\b/i, type: "boq", reason: "The SOW says the unabridged BOQ is attached." },
+  { pattern: /\bappendix\s+[a-z0-9]+\b/i, type: "schedule", reason: "The SOW references an appendix that may contain scope detail." },
+  { pattern: /\battached drawing\b/i, type: "drawing", reason: "The SOW references an attached drawing." },
+  { pattern: /\bdrawing to be issued\b/i, type: "drawing", reason: "The SOW states that a drawing is required or will be issued separately." },
+  { pattern: /\bdocuments attached to this scope\b/i, type: "schedule", reason: "The SOW lists supporting documents attached to the scope." },
+];
 
 function countTextHits(text: string, terms: string[]): number {
   return terms.reduce((count, term) => count + (text.includes(term) ? 1 : 0), 0);
@@ -269,8 +292,70 @@ async function generateStructuredContent<T>({
   throw lastError instanceof Error ? lastError : new Error("No Gemini model was available.");
 }
 
-function inferSOWHeuristics(text: string): SOWValidationResult {
+function detectRequiredAttachments(text: string): RequiredAttachment[] {
+  const matches = REQUIRED_ATTACHMENT_PATTERNS.filter(({ pattern }) => pattern.test(text));
+  const deduped = new Map<string, RequiredAttachment>();
+  for (const match of matches) {
+    const key = `${match.type}:${match.reason}`;
+    deduped.set(key, {
+      type: match.type,
+      reason: match.reason,
+      required: true,
+    });
+  }
+  return Array.from(deduped.values());
+}
+
+function inferSourceBundleStatus(
+  requiredAttachments: RequiredAttachment[],
+  supportingDocsCount = 0
+): SourceBundleStatus {
+  if (requiredAttachments.length > 0 && supportingDocsCount < requiredAttachments.length) {
+    return "missing_required_attachments";
+  }
+  if (supportingDocsCount > 0 && requiredAttachments.length === 0) {
+    return "partial_optional_context";
+  }
+  return "complete";
+}
+
+function normalizeSourceDocumentType(
+  type: GenerationInputDocument["document_type"] | undefined,
+  role: "primary" | "supporting"
+): SourceBundleDocument["document_type"] {
+  if (type) return type;
+  return role === "primary" ? "construction_sow" : "supporting_context";
+}
+
+function buildSourceBundle(documents: GenerationInputDocument[]): SourceBundleDocument[] {
+  return documents.map((doc) => ({
+    document_id: doc.document_id,
+    name: doc.name,
+    document_type: normalizeSourceDocumentType(doc.document_type, doc.role),
+    role: doc.role,
+    pages: doc.pages ?? null,
+  }));
+}
+
+function buildPromptBundle(documents: GenerationInputDocument[]): string {
+  return documents
+    .map((doc, index) => {
+      const label = doc.role === "primary" ? "PRIMARY SOW" : `ATTACHED ${doc.document_type ?? "DOCUMENT"}`;
+      return [
+        `### ${label} ${index + 1}`,
+        `document_id: ${doc.document_id}`,
+        `name: ${doc.name}`,
+        `pages: ${doc.pages ?? "unknown"}`,
+        doc.text,
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+function inferSOWHeuristics(text: string, supportingDocsCount = 0): SOWValidationResult {
   const preview = text.slice(0, 12000).toLowerCase();
+  const requiredAttachments = detectRequiredAttachments(text);
+  const sourceBundleStatus = inferSourceBundleStatus(requiredAttachments, supportingDocsCount);
   const headingHits = countTextHits(preview, SOW_HEADING_TERMS);
   const tradeHits = countTextHits(preview, TRADE_SECTION_TERMS);
   const executionHits = countTextHits(preview, CONSTRUCTION_EXECUTION_TERMS);
@@ -317,6 +402,8 @@ function inferSOWHeuristics(text: string): SOWValidationResult {
   ].filter(Boolean).length;
 
   const flags: string[] = [];
+  const positiveSignals: string[] = [];
+  const negativeSignals: string[] = [];
   if (positiveCategories < 2) flags.push("Missing enough construction-document markers for a reliable SOW classification.");
   if (tradeHits < 2) flags.push("Very few construction trade sections were found.");
   if (unitHits < 3 && specHits < 2) flags.push("Very little measurable or material/specification language was found.");
@@ -324,6 +411,16 @@ function inferSOWHeuristics(text: string): SOWValidationResult {
   if (productHits >= 3) flags.push("Document reads more like a product/system specification than a construction works scope.");
   if (creativeHits >= 2) flags.push("Document reads more like creative or lyrical content than a project scope.");
   if (commercialHits >= 2) flags.push("Document reads more like a commercial/rate schedule than a scope document.");
+  if (headingHits >= 2) positiveSignals.push("Contains recognised scope/BOQ headings.");
+  if (tradeHits >= 2) positiveSignals.push("Contains construction trade sections.");
+  if (executionHits >= 4) positiveSignals.push("Contains contractor/specification execution language.");
+  if (unitHits >= 4 || specHits >= 3) positiveSignals.push("Contains measurable/specification detail.");
+  if (hasBOQTableSignals) positiveSignals.push("Contains BOQ-style tabular columns.");
+  if (questionnaireHits >= 2) negativeSignals.push("Questionnaire/survey style prompts detected.");
+  if (productHits >= 3) negativeSignals.push("Product/software specification language detected.");
+  if (creativeHits >= 2) negativeSignals.push("Creative or lyrical language detected.");
+  if (commercialHits >= 2) negativeSignals.push("Commercial/rate-sheet language detected.");
+  if (abstractSectionHits >= 4) negativeSignals.push("Abstract planning sections outweigh scope detail.");
 
   const positiveScore =
     headingHits * 1.35 +
@@ -349,6 +446,11 @@ function inferSOWHeuristics(text: string): SOWValidationResult {
         "This looks like a rate sheet, priced BOQ, or commercial schedule rather than a statement of work describing the underlying construction scope.",
       confidence: 0.9,
       documentType: "boq_or_cost_document",
+      should_block_generation: true,
+      required_attachments: requiredAttachments,
+      source_bundle_status: sourceBundleStatus,
+      positive_signals: positiveSignals,
+      negative_signals: negativeSignals,
       flags,
     };
   }
@@ -361,10 +463,16 @@ function inferSOWHeuristics(text: string): SOWValidationResult {
       confidence: clamp01(0.8 + Math.min(0.14, Math.abs(negativeScore - positiveScore) * 0.02)),
       documentType:
         creativeHits >= 2 || questionnaireHits >= 2
-          ? "technical_spec_non_construction"
+          ? "questionnaire_or_survey"
           : productHits >= 3
-            ? "software_product_spec"
+            ? "product_or_software_spec"
             : "unknown",
+      should_block_generation:
+        sourceBundleStatus === "missing_required_attachments" ? true : true,
+      required_attachments: requiredAttachments,
+      source_bundle_status: sourceBundleStatus,
+      positive_signals: positiveSignals,
+      negative_signals: negativeSignals,
       flags,
     };
   }
@@ -375,7 +483,13 @@ function inferSOWHeuristics(text: string): SOWValidationResult {
       reason:
         "This document contains the sectioning, trade language, contractor obligations, and measurable specification detail expected in a construction SOW/BOQ source.",
       confidence: clamp01(0.72 + Math.min(0.18, (positiveScore - negativeScore) * 0.03)),
-      documentType: hasBOQTableSignals ? "boq_or_cost_document" : "construction_sow",
+      documentType:
+        hasBOQTableSignals && hasScopeLikeContent ? "engineering_spec" : "construction_sow",
+      should_block_generation: sourceBundleStatus === "missing_required_attachments",
+      required_attachments: requiredAttachments,
+      source_bundle_status: sourceBundleStatus,
+      positive_signals: positiveSignals,
+      negative_signals: negativeSignals,
       flags,
     };
   }
@@ -387,10 +501,15 @@ function inferSOWHeuristics(text: string): SOWValidationResult {
     confidence: clamp01(0.55 + Math.min(0.2, Math.abs(negativeScore - positiveScore) * 0.02)),
     documentType:
       questionnaireHits >= 2 || creativeHits >= 2
-        ? "technical_spec_non_construction"
+        ? "creative_or_unstructured"
         : productHits >= 3
-          ? "software_product_spec"
+          ? "product_or_software_spec"
           : "unknown",
+    should_block_generation: true,
+    required_attachments: requiredAttachments,
+    source_bundle_status: sourceBundleStatus,
+    positive_signals: positiveSignals,
+    negative_signals: negativeSignals,
     flags,
   };
 }
@@ -424,6 +543,8 @@ const STRUCTURE_SCHEMA = {
                 item_no: { type: SchemaType.STRING, nullable: true },
                 description: { type: SchemaType.STRING },
                 unit: { type: SchemaType.STRING, nullable: true },
+                section_context: { type: SchemaType.STRING, nullable: true },
+                source_excerpt: { type: SchemaType.STRING, nullable: true },
                 is_header: { type: SchemaType.BOOLEAN, nullable: true },
                 note: { type: SchemaType.STRING, nullable: true },
               },
@@ -453,6 +574,9 @@ const QUANTITY_SCHEMA = {
           quantity_confidence: { type: SchemaType.NUMBER, nullable: true },
           source_excerpt: { type: SchemaType.STRING, nullable: true },
           source_anchor: { type: SchemaType.STRING, nullable: true },
+          source_document: { type: SchemaType.STRING, nullable: true },
+          evidence_type: { type: SchemaType.STRING, nullable: true },
+          derivation_note: { type: SchemaType.STRING, nullable: true },
           note: { type: SchemaType.STRING, nullable: true },
         },
         required: ["item_key", "qty"],
@@ -504,14 +628,23 @@ RULES:
    - assumed: uncertain or not stated
 4. If uncertain, set qty null and quantity_source assumed.
 5. Set quantity_confidence between 0 and 1.
-6. Use standard units (m, m², m³, No., Item, LS, kg, t).`;
+6. Use standard units (m, m², m³, No., Item, LS, kg, t).
+7. Set evidence_type:
+   - quoted_scope: directly quoted from prose scope
+   - tabulated_scope: from tabular BOQ/schedule text
+   - derived_calculation: calculated from stated dimensions
+   - metadata_only: only document metadata available
+   - missing: no usable evidence
+8. Set source_anchor to the nearest page marker (for example "Page 3") when page markers are present. Otherwise use the nearest section heading or document anchor.
+9. Set source_document to the document_id that the evidence came from.
+10. If evidence_type is derived_calculation, add derivation_note explaining the math briefly.`;
 
 async function generateStructure(
-  sowText: string,
+  bundleText: string,
   recoveryMode: boolean
 ): Promise<StructurePassResponse> {
   return callModel<StructurePassResponse>({
-    prompt: `Extract BOQ structure only from this SOW:\n\n${sowText}`,
+    prompt: `Extract BOQ structure only from this document bundle:\n\n${bundleText}`,
     responseSchema: STRUCTURE_SCHEMA,
     systemInstruction: recoveryMode ? STRUCTURE_RECOVERY_PROMPT : STRUCTURE_PROMPT,
     temperature: recoveryMode ? 0.3 : 0.2,
@@ -519,7 +652,7 @@ async function generateStructure(
 }
 
 async function extractQuantities(
-  sowText: string,
+  bundleText: string,
   structure: BOQStructureArtifact
 ): Promise<QuantityPassResponse> {
   const itemCatalog = structure.bills.flatMap((bill) =>
@@ -536,7 +669,7 @@ async function extractQuantities(
   );
 
   return callModel<QuantityPassResponse>({
-    prompt: `SOW TEXT:\n${sowText}\n\nITEMS TO QUANTIFY (JSON):\n${JSON.stringify(
+    prompt: `DOCUMENT BUNDLE:\n${bundleText}\n\nITEMS TO QUANTIFY (JSON):\n${JSON.stringify(
       itemCatalog
     )}`,
     responseSchema: QUANTITY_SCHEMA,
@@ -593,6 +726,8 @@ function normalizeStructure(raw: StructurePassResponse): BOQStructureArtifact {
           item_no: safeText(item.item_no, ""),
           description: safeText(item.description, "Unspecified work item"),
           unit: normalizeUnit(item.unit),
+          section_context: safeNullableText(item.section_context) ?? undefined,
+          source_excerpt: safeNullableText(item.source_excerpt),
           is_header: isHeader,
           note: item.note ?? undefined,
         };
@@ -606,6 +741,110 @@ function countNonHeaderItems(structure: BOQStructureArtifact): number {
     (sum, bill) => sum + bill.items.filter((item) => !item.is_header).length,
     0
   );
+}
+
+function normalizeLabelText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/["'`]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\b(the|and|for|with|including|new|approved|complete|as|per)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isCountableDrawingLabel(description: string): boolean {
+  const normalized = normalizeLabelText(description);
+  if (!normalized) return false;
+  const wordCount = normalized.split(" ").length;
+  const hasComma = description.includes(",");
+  const hasLongSentence = wordCount > 5;
+  const actionLike = /\b(install|construct|provide|erect|supply|lay|testing|commissioning)\b/i.test(
+    description
+  );
+  return !hasComma && !hasLongSentence && !actionLike;
+}
+
+function countLabelMatches(text: string, description: string): { count: number; excerpt: string | null } {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const normalizedTarget = normalizeLabelText(description);
+  if (!normalizedTarget) return { count: 0, excerpt: null };
+
+  let count = 0;
+  let excerpt: string | null = null;
+  for (const line of lines) {
+    const normalizedLine = normalizeLabelText(line);
+    if (!normalizedLine) continue;
+    if (
+      normalizedLine === normalizedTarget ||
+      normalizedLine.includes(normalizedTarget) ||
+      normalizedTarget.includes(normalizedLine)
+    ) {
+      count += 1;
+      if (!excerpt) excerpt = line;
+    }
+  }
+
+  return { count, excerpt };
+}
+
+function applyDrawingCountHeuristics(
+  structure: BOQStructureArtifact,
+  quantities: QuantityPassResponse,
+  documents: GenerationInputDocument[]
+): QuantityPassResponse {
+  const itemMeta = new Map<string, { description: string; unit: string }>();
+  for (const bill of structure.bills) {
+    for (const item of bill.items) {
+      if (!item.is_header) {
+        itemMeta.set(item.item_key, { description: item.description, unit: item.unit });
+      }
+    }
+  }
+
+  const supportingDocs = documents.filter((doc) => doc.role === "supporting" && doc.text.trim().length > 0);
+  if (supportingDocs.length === 0) return quantities;
+
+  return {
+    items: (quantities.items ?? []).map((item) => {
+      if (item.qty !== null && item.qty !== undefined) return item;
+      const meta = itemMeta.get(item.item_key);
+      if (!meta || !isCountableDrawingLabel(meta.description)) return item;
+
+      let best: { count: number; excerpt: string | null; docId: string | null } = {
+        count: 0,
+        excerpt: null,
+        docId: null,
+      };
+
+      for (const doc of supportingDocs) {
+        const match = countLabelMatches(doc.text, meta.description);
+        if (match.count > best.count) {
+          best = { count: match.count, excerpt: match.excerpt, docId: doc.document_id };
+        }
+      }
+
+      if (best.count <= 0 || best.count > 5) return item;
+
+      return {
+        ...item,
+        qty: best.count,
+        unit: item.unit ?? (meta.unit && meta.unit !== "Item" ? meta.unit : "No."),
+        quantity_source: "derived",
+        quantity_confidence: 0.55,
+        source_excerpt: best.excerpt ?? item.source_excerpt ?? null,
+        source_anchor: item.source_anchor ?? "Drawing label count",
+        source_document: best.docId ?? item.source_document ?? null,
+        evidence_type: "derived_calculation",
+        derivation_note:
+          item.derivation_note ??
+          `Counted ${best.count} matching drawing label${best.count === 1 ? "" : "s"} for "${meta.description}".`,
+      };
+    }),
+  };
 }
 
 /**
@@ -634,7 +873,37 @@ const SOW_VALIDATION_SCHEMA = {
     documentType: {
       type: SchemaType.STRING,
       description:
-        "One of: construction_sow, boq_or_cost_document, technical_spec_non_construction, software_product_spec, unknown",
+        "One of: construction_sow, engineering_spec, boq_or_cost_document, questionnaire_or_survey, product_or_software_spec, creative_or_unstructured, unknown",
+    },
+    should_block_generation: {
+      type: SchemaType.BOOLEAN,
+      description: "True when BOQ generation should be blocked for this document",
+    },
+    required_attachments: {
+      type: SchemaType.ARRAY,
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          type: { type: SchemaType.STRING },
+          reason: { type: SchemaType.STRING },
+          required: { type: SchemaType.BOOLEAN },
+        },
+        required: ["type", "reason", "required"],
+      },
+    },
+    source_bundle_status: {
+      type: SchemaType.STRING,
+      description: "One of: complete, missing_required_attachments, partial_optional_context",
+    },
+    positive_signals: {
+      type: SchemaType.ARRAY,
+      items: { type: SchemaType.STRING },
+      description: "General construction-document signals detected in the input",
+    },
+    negative_signals: {
+      type: SchemaType.ARRAY,
+      items: { type: SchemaType.STRING },
+      description: "Signals suggesting the document is not a valid BOQ source",
     },
     flags: {
       type: SchemaType.ARRAY,
@@ -642,12 +911,26 @@ const SOW_VALIDATION_SCHEMA = {
       description: "Specific warning flags that influenced the determination",
     },
   },
-  required: ["isSOW", "reason", "confidence", "documentType", "flags"],
+  required: [
+    "isSOW",
+    "reason",
+    "confidence",
+    "documentType",
+    "should_block_generation",
+    "required_attachments",
+    "source_bundle_status",
+    "positive_signals",
+    "negative_signals",
+    "flags",
+  ],
 };
 
-export async function validateSOW(text: string): Promise<SOWValidationResult> {
+export async function validateSOW(
+  text: string,
+  opts?: { supportingDocsCount?: number }
+): Promise<SOWValidationResult> {
   const preview = text.slice(0, 6000);
-  const heuristic = inferSOWHeuristics(text);
+  const heuristic = inferSOWHeuristics(text, opts?.supportingDocsCount ?? 0);
 
   if (!heuristic.isSOW && heuristic.confidence >= 0.82) {
     return heuristic;
@@ -676,8 +959,9 @@ ${preview}`,
 
     const llmLooksNonSow =
       !llm.isSOW ||
-      llm.documentType === "software_product_spec" ||
-      llm.documentType === "technical_spec_non_construction" ||
+      llm.documentType === "product_or_software_spec" ||
+      llm.documentType === "questionnaire_or_survey" ||
+      llm.documentType === "creative_or_unstructured" ||
       llm.documentType === "boq_or_cost_document";
 
     if (!heuristic.isSOW && llmLooksNonSow) {
@@ -687,6 +971,19 @@ ${preview}`,
         confidence: clamp01(Math.max(heuristic.confidence, llm.confidence ?? 0.7)),
         documentType:
           llm.documentType === "unknown" ? heuristic.documentType : llm.documentType,
+        should_block_generation: llm.should_block_generation ?? true,
+        required_attachments:
+          llm.required_attachments?.length > 0
+            ? llm.required_attachments
+            : heuristic.required_attachments,
+        source_bundle_status:
+          llm.source_bundle_status ?? heuristic.source_bundle_status,
+        positive_signals: Array.from(
+          new Set([...(heuristic.positive_signals ?? []), ...(llm.positive_signals ?? [])])
+        ).slice(0, 6),
+        negative_signals: Array.from(
+          new Set([...(heuristic.negative_signals ?? []), ...(llm.negative_signals ?? [])])
+        ).slice(0, 6),
         flags: Array.from(new Set([...heuristic.flags, ...(llm.flags ?? [])])).slice(0, 6),
       };
     }
@@ -698,6 +995,19 @@ ${preview}`,
         confidence: clamp01(Math.max(heuristic.confidence, llm.confidence ?? 0.65)),
         documentType:
           llm.documentType === "unknown" ? heuristic.documentType : llm.documentType,
+        should_block_generation: llm.should_block_generation ?? false,
+        required_attachments:
+          llm.required_attachments?.length > 0
+            ? llm.required_attachments
+            : heuristic.required_attachments,
+        source_bundle_status:
+          llm.source_bundle_status ?? heuristic.source_bundle_status,
+        positive_signals: Array.from(
+          new Set([...(heuristic.positive_signals ?? []), ...(llm.positive_signals ?? [])])
+        ).slice(0, 6),
+        negative_signals: Array.from(
+          new Set([...(heuristic.negative_signals ?? []), ...(llm.negative_signals ?? [])])
+        ).slice(0, 6),
         flags: Array.from(new Set([...heuristic.flags, ...(llm.flags ?? [])])).slice(0, 6),
       };
     }
@@ -722,8 +1032,19 @@ const QA_SCHEMA = {
       items: { type: SchemaType.STRING },
       description: "List of specific quality warnings or issues found (empty array if none)",
     },
+    subscores: {
+      type: SchemaType.OBJECT,
+      properties: {
+        coverage: { type: SchemaType.NUMBER },
+        source_completeness: { type: SchemaType.NUMBER },
+        field_integrity: { type: SchemaType.NUMBER },
+        evidence_traceability: { type: SchemaType.NUMBER },
+        boq_semantics: { type: SchemaType.NUMBER },
+      },
+      required: ["coverage", "source_completeness", "field_integrity", "evidence_traceability", "boq_semantics"],
+    },
   },
-  required: ["score", "grade", "summary", "flags"],
+  required: ["score", "grade", "summary", "flags", "subscores"],
 };
 
 export async function scoreBOQ(boq: import("./types").BOQDocument): Promise<{
@@ -731,6 +1052,13 @@ export async function scoreBOQ(boq: import("./types").BOQDocument): Promise<{
   grade: "Strong" | "Good" | "Fair" | "Weak";
   summary: string;
   flags: string[];
+  subscores?: {
+    coverage: number;
+    source_completeness: number;
+    field_integrity: number;
+    evidence_traceability: number;
+    boq_semantics: number;
+  };
   source?: "deterministic" | "hybrid";
   updated_at?: string;
 }> {
@@ -762,6 +1090,13 @@ export async function scoreBOQ(boq: import("./types").BOQDocument): Promise<{
       grade: "Strong" | "Good" | "Fair" | "Weak";
       summary: string;
       flags: string[];
+      subscores: {
+        coverage: number;
+        source_completeness: number;
+        field_integrity: number;
+        evidence_traceability: number;
+        boq_semantics: number;
+      };
     }>({
       preferredModel: FALLBACK_MODEL,
       responseSchema: QA_SCHEMA,
@@ -1155,14 +1490,32 @@ PARSING RULES:
 }
 
 export async function generateBOQ(
-  sowText: string,
-  opts?: { suggestRates?: boolean }
+  input: string | GenerationInputBundle,
+  opts?: {
+    suggestRates?: boolean;
+    documentClassification?: DocumentClassification;
+  }
 ): Promise<BOQDocument> {
-  const structureRaw = await generateStructure(sowText, false);
+  const documents =
+    typeof input === "string"
+      ? [
+          {
+            document_id: "primary",
+            name: "Primary SOW",
+            role: "primary" as const,
+            document_type: "construction_sow" as const,
+            text: input,
+            pages: null,
+          },
+        ]
+      : input.documents;
+  const bundleText = buildPromptBundle(documents);
+
+  const structureRaw = await generateStructure(bundleText, false);
   let structure = normalizeStructure(structureRaw);
 
   if (countNonHeaderItems(structure) === 0) {
-    const retryRaw = await generateStructure(sowText, true);
+    const retryRaw = await generateStructure(bundleText, true);
     structure = normalizeStructure(retryRaw);
   }
 
@@ -1172,8 +1525,17 @@ export async function generateBOQ(
     );
   }
 
-  const quantitiesRaw = await extractQuantities(sowText, structure);
-  const boq = mergeStructureAndQuantities(structure, quantitiesRaw);
+  const quantitiesRaw = applyDrawingCountHeuristics(
+    structure,
+    await extractQuantities(bundleText, structure),
+    documents
+  );
+  const boq = mergeStructureAndQuantities(
+    structure,
+    quantitiesRaw,
+    opts?.documentClassification,
+    buildSourceBundle(documents)
+  );
   if (opts?.suggestRates) {
     return fillRatesPass(boq);
   }
@@ -1182,7 +1544,9 @@ export async function generateBOQ(
 
 function mergeStructureAndQuantities(
   structure: BOQStructureArtifact,
-  quantities: QuantityPassResponse
+  quantities: QuantityPassResponse,
+  documentClassification?: DocumentClassification,
+  sourceBundle?: SourceBundleDocument[]
 ): BOQDocument {
   const quantityMap = new Map<string, BOQQuantityArtifactItem>();
   for (const item of quantities.items ?? []) {
@@ -1195,6 +1559,9 @@ function mergeStructureAndQuantities(
       quantity_confidence: normalizeConfidence(item.quantity_confidence),
       source_excerpt: safeNullableText(item.source_excerpt),
       source_anchor: safeNullableText(item.source_anchor),
+      source_document: safeNullableText(item.source_document),
+      evidence_type: normalizeEvidenceType(item.evidence_type, item.source_excerpt, item.qty),
+      derivation_note: safeNullableText(item.derivation_note),
       note: safeNullableText(item.note) ?? undefined,
     });
   }
@@ -1208,79 +1575,112 @@ function mergeStructureAndQuantities(
   const bills = structure.bills.map((bill) => ({
     number: bill.number,
     title: bill.title,
-    items: bill.items.map((baseItem): BOQItem => {
-      if (baseItem.is_header) {
-        return {
+    items: (() => {
+      const mergedItems: BOQItem[] = [];
+      let currentSection: string | null = null;
+
+      for (const baseItem of bill.items) {
+        if (!baseItem.is_header && baseItem.section_context) {
+          const normalizedSection = safeText(baseItem.section_context, "").trim();
+          if (normalizedSection && normalizedSection !== currentSection) {
+            currentSection = normalizedSection;
+            mergedItems.push({
+              item_key: `${baseItem.item_key}_section`,
+              item_no: "",
+              description: normalizedSection,
+              unit: "",
+              qty: null,
+              rate: null,
+              amount: null,
+              is_header: true,
+            });
+          }
+        }
+
+        if (baseItem.is_header) {
+          currentSection = baseItem.description;
+          mergedItems.push({
+            item_key: baseItem.item_key,
+            item_no: "",
+            description: baseItem.description,
+            unit: "",
+            qty: null,
+            rate: null,
+            amount: null,
+            is_header: true,
+          });
+          continue;
+        }
+
+        totalItems += 1;
+        const q = quantityMap.get(baseItem.item_key);
+        let qty = q?.qty ?? null;
+        let source = q?.quantity_source ?? "assumed";
+        const confidence = q?.quantity_confidence ?? 0.4;
+        const excerpt = q?.source_excerpt ?? null;
+        const anchor = q?.source_anchor ?? null;
+        const sourceDocument = q?.source_document ?? null;
+
+        if (qty !== null && !hasSufficientEvidence(excerpt)) {
+          validationFlags.push({
+            item_key: baseItem.item_key,
+            issue: "missing_evidence",
+            severity: "warning",
+            code: "QTY_EVIDENCE_REQUIRED",
+            message: "Quantity removed because supporting source evidence was missing.",
+          });
+          qty = null;
+          source = "assumed";
+        }
+
+        if (q?.qty != null && qty === null) {
+          validationFlags.push({
+            item_key: baseItem.item_key,
+            issue: "invalid_quantity",
+            severity: "warning",
+            code: "QTY_INVALID_VALUE",
+            message: "Invalid quantity value was discarded.",
+          });
+        }
+
+        if (qty === null) {
+          qtyMissing += 1;
+          validationFlags.push({
+            item_key: baseItem.item_key,
+            issue: "missing_quantity",
+            severity: "info",
+            code: "QTY_UNRESOLVED",
+            message: "Quantity is unresolved and requires manual review.",
+          });
+        } else if (hasSufficientEvidence(excerpt)) {
+          qtyWithEvidence += 1;
+        }
+
+        if (confidence < 0.6) {
+          lowConfidence += 1;
+        }
+
+        mergedItems.push({
           item_key: baseItem.item_key,
-          item_no: "",
+          item_no: baseItem.item_no,
           description: baseItem.description,
-          unit: "",
-          qty: null,
+          unit: normalizeUnit(q?.unit || baseItem.unit),
+          qty,
           rate: null,
           amount: null,
-          is_header: true,
-        };
-      }
-
-      totalItems += 1;
-      const q = quantityMap.get(baseItem.item_key);
-      let qty = q?.qty ?? null;
-      let source = q?.quantity_source ?? "assumed";
-      const confidence = q?.quantity_confidence ?? 0.4;
-      const excerpt = q?.source_excerpt ?? null;
-      const anchor = q?.source_anchor ?? null;
-
-      if (qty !== null && !hasSufficientEvidence(excerpt)) {
-        validationFlags.push({
-          item_key: baseItem.item_key,
-          issue: "missing_evidence",
-          severity: "warning",
-          message: "Quantity removed because supporting source evidence was missing.",
-        });
-        qty = null;
-        source = "assumed";
-      }
-
-      if (q?.qty != null && qty === null) {
-        validationFlags.push({
-          item_key: baseItem.item_key,
-          issue: "invalid_quantity",
-          severity: "warning",
-          message: "Invalid quantity value was discarded.",
+          quantity_source: source,
+          quantity_confidence: confidence,
+          source_excerpt: excerpt,
+          source_anchor: anchor,
+          source_document: sourceDocument,
+          evidence_type: q?.evidence_type ?? "missing",
+          derivation_note: q?.derivation_note ?? null,
+          note: q?.note ?? baseItem.note,
         });
       }
 
-      if (qty === null) {
-        qtyMissing += 1;
-        validationFlags.push({
-          item_key: baseItem.item_key,
-          issue: "missing_quantity",
-          severity: "info",
-          message: "Quantity is unresolved and requires manual review.",
-        });
-      } else if (hasSufficientEvidence(excerpt)) {
-        qtyWithEvidence += 1;
-      }
-
-      if (confidence < 0.6) {
-        lowConfidence += 1;
-      }
-
-      return {
-        item_key: baseItem.item_key,
-        item_no: baseItem.item_no,
-        description: baseItem.description,
-        unit: normalizeUnit(q?.unit || baseItem.unit),
-        qty,
-        rate: null,
-        amount: null,
-        quantity_source: source,
-        quantity_confidence: confidence,
-        source_excerpt: excerpt,
-        source_anchor: anchor,
-        note: q?.note ?? baseItem.note,
-      };
-    }),
+      return mergedItems;
+    })(),
   }));
 
   const qualitySummary: BOQQualitySummary = {
@@ -1288,6 +1688,13 @@ function mergeStructureAndQuantities(
     qty_with_evidence: qtyWithEvidence,
     qty_missing: qtyMissing,
     low_confidence: lowConfidence,
+    semantic_risk_items: bills
+      .flatMap((bill) => bill.items)
+      .filter((item) => !item.is_header && item.evidence_type === "missing").length,
+    evidence_coverage_ratio:
+      totalItems > 0 ? Number((qtyWithEvidence / totalItems).toFixed(2)) : 0,
+    source_bundle_status: documentClassification?.source_bundle_status ?? "complete",
+    missing_required_attachments: documentClassification?.required_attachments.length ?? 0,
   };
 
   const artifacts: BOQArtifacts = {
@@ -1302,7 +1709,9 @@ function mergeStructureAndQuantities(
     prepared_by: structure.prepared_by,
     date: structure.date,
     bills,
-    pipeline_version: "quantity-v1.0",
+    pipeline_version: "quantity-v2.0",
+    document_classification: documentClassification,
+    source_bundle: sourceBundle,
     quality_summary: qualitySummary,
     artifacts,
   };
@@ -1359,6 +1768,25 @@ function normalizeConfidence(confidence: number | null | undefined): number {
   if (confidence < 0) return 0;
   if (confidence > 1) return 1;
   return Number(confidence.toFixed(2));
+}
+
+function normalizeEvidenceType(
+  evidenceType: string | BOQEvidenceType | null | undefined,
+  excerpt: string | null | undefined,
+  qty: number | null
+): BOQEvidenceType {
+  const clean = (evidenceType ?? "").toLowerCase();
+  if (
+    clean === "quoted_scope" ||
+    clean === "tabulated_scope" ||
+    clean === "derived_calculation" ||
+    clean === "metadata_only" ||
+    clean === "missing"
+  ) {
+    return clean;
+  }
+  if (qty == null || !excerpt?.trim()) return "missing";
+  return "quoted_scope";
 }
 
 export function hasSufficientEvidence(excerpt: string | null): boolean {
