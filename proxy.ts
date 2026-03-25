@@ -29,6 +29,18 @@ const RATE_LIMITED_ROUTES = [
 export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
 
+  // Capture referral code from ?ref= query param and persist in a 30-day cookie.
+  // First-click wins: don't overwrite an existing ref_code cookie.
+  const refCode = request.nextUrl.searchParams.get("ref");
+  if (refCode && !request.cookies.has("ref_code") && /^[a-zA-Z0-9]{4,20}$/.test(refCode)) {
+    supabaseResponse.cookies.set("ref_code", refCode, {
+      maxAge: 60 * 60 * 24 * 30,
+      path: "/",
+      sameSite: "lax",
+      httpOnly: false,
+    });
+  }
+
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
