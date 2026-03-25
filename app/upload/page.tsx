@@ -49,8 +49,9 @@ function GenerateBOQTab() {
   } | null>(null);
   const [supportingUploads, setSupportingUploads] = useState<SupportingUpload[]>([]);
   const [primaryDoc, setPrimaryDoc] = useState<ExtractedDoc | null>(null);
-  const [bundleDocs, setBundleDocs] = useState<ExtractedDoc[]>([]);
+const [bundleDocs, setBundleDocs] = useState<ExtractedDoc[]>([]);
   const ph = usePostHog();
+  const MAX_GENERATE_FILE_SIZE = 15 * 1024 * 1024;
   const attachedSupportingCount = supportingUploads.filter((upload) => upload.file).length;
   const processedSupportingCount = supportingUploads.filter((upload) => upload.processedDoc).length;
   const hasAllRequiredAttachments =
@@ -81,12 +82,7 @@ function GenerateBOQTab() {
   }, [classification, hasAllRequiredAttachments, hasProcessedAllRequiredAttachments, stage]);
 
   function handleFile(f: File) {
-    const name = f.name.toLowerCase();
-    if (!name.endsWith(".pdf") && !name.endsWith(".docx")) {
-      setError("Please upload a PDF or Word (.docx) document.");
-      return;
-    }
-    setFile(f);
+    setFile(null);
     setStage("idle");
     setError(null);
     setPages(null);
@@ -96,6 +92,17 @@ function GenerateBOQTab() {
     setSupportingUploads([]);
     setPrimaryDoc(null);
     setBundleDocs([]);
+
+    const name = f.name.toLowerCase();
+    if (!name.endsWith(".pdf") && !name.endsWith(".docx")) {
+      setError("Please upload a PDF or Word (.docx) document.");
+      return;
+    }
+    if (f.size > MAX_GENERATE_FILE_SIZE) {
+      setError("File too large. Please upload a PDF or Word document smaller than 15 MB.");
+      return;
+    }
+    setFile(f);
   }
 
   async function extractSingleDocument(
@@ -115,13 +122,28 @@ function GenerateBOQTab() {
     negativeSignals?: string[];
     sowFlags?: string[];
   }> {
+    async function readErrorMessage(res: Response): Promise<string> {
+      const contentType = res.headers.get("content-type") || "";
+
+      if (contentType.includes("application/json")) {
+        const payload = (await res.json()) as { error?: string };
+        return payload.error || "Extraction failed";
+      }
+
+      const raw = (await res.text()).trim();
+      if (!raw) return "Extraction failed";
+      if (/request entity too large/i.test(raw)) {
+        return "File too large. Please upload a PDF or Word document smaller than 15 MB.";
+      }
+      return raw;
+    }
+
     const form = new FormData();
     form.append("file", documentFile);
     form.append("supporting_docs_count", String(supportingDocsCount));
     const res = await fetch("/api/extract", { method: "POST", body: form });
     if (!res.ok) {
-      const { error: e } = await res.json();
-      throw new Error(e || "Extraction failed");
+      throw new Error(await readErrorMessage(res));
     }
     return res.json();
   }
