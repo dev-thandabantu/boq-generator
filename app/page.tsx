@@ -1,3 +1,4 @@
+import BrandLogo from "@/components/BrandLogo";
 import Footer from "@/components/Footer";
 import { DEFAULT_PRICE_LABEL } from "@/lib/pricing";
 
@@ -7,9 +8,7 @@ export default function LandingPage() {
       {/* Nav */}
       <nav className="fixed top-0 left-0 right-0 z-20 border-b border-white/5 bg-[#0a0a0a]/80 backdrop-blur">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <span className="text-sm font-semibold text-white">
-            BOQ <span className="text-amber-400">Generator</span>
-          </span>
+          <BrandLogo size="sm" />
           <div className="flex items-center gap-4">
             <a href="/dashboard" className="text-xs text-gray-400 hover:text-white transition-colors hidden sm:block">
               My BOQs

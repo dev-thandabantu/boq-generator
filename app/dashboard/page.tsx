@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import BrandLogo from "@/components/BrandLogo";
 import { createClient } from "@/lib/supabase/client";
 import type { User } from "@supabase/supabase-js";
 import Footer from "@/components/Footer";
@@ -86,9 +87,7 @@ export default function DashboardPage() {
       <header className="border-b border-white/10 bg-[#0a0a0a]/95 backdrop-blur sticky top-0 z-20">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <a href="/" className="font-bold text-white hover:text-amber-100 transition-colors">
-              BOQ <span className="text-amber-400">Generator</span>
-            </a>
+            <BrandLogo size="sm" />
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs text-gray-500 hidden sm:block">{user?.email}</span>

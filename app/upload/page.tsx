@@ -1,5 +1,6 @@
 "use client";
 
+import BrandLogo from "@/components/BrandLogo";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Progress } from "@/components/ui/progress";
 import Footer from "@/components/Footer";
@@ -1127,9 +1128,7 @@ export default function UploadPage() {
       {/* Nav */}
       <nav className="fixed top-0 left-0 right-0 z-20 border-b border-white/5 bg-[#0f0f0f]/80 backdrop-blur">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <a href="/" className="text-sm font-semibold text-white">
-            BOQ <span className="text-amber-400">Generator</span>
-          </a>
+          <BrandLogo size="sm" />
           <a href="/dashboard" className="text-xs text-gray-500 hover:text-gray-300 transition-colors">
             My BOQs →
           </a>
@@ -1143,9 +1142,7 @@ export default function UploadPage() {
 
       <div className="relative z-10 w-full max-w-xl animate-fade-up">
         <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold tracking-tight mb-3">
-            BOQ <span className="text-amber-400">Generator</span>
-          </h1>
+          <BrandLogo size="lg" className="justify-center" />
         </div>
 
         {/* Tab switcher */}
@@ -1203,5 +1200,6 @@ function ExcelIcon({ className }: { className?: string }) {
     </svg>
   );
 }
+
 
 
