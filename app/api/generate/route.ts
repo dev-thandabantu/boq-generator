@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateBOQ, validateSOW } from "@/lib/claude";
 import type { GenerationInputDocument } from "@/lib/claude";
-import { getStripe } from "@/lib/stripe";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { logger } from "@/lib/logger";
 import { trackEvent } from "@/lib/analytics";
+import { computePricing, loadTiers } from "@/lib/pricing";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -43,17 +43,27 @@ function classifyGenerateError(message: string): { status: number; safeMessage: 
 
 export async function POST(req: NextRequest) {
   try {
+    // Auth check first — before any AI calls
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const body = await req.json();
-    const { text, documents, session_id, suggest_rates } = body as {
+    const { text, documents, suggest_rates } = body as {
       text?: string;
       documents?: GenerationInputDocument[];
-      session_id: string;
       suggest_rates?: boolean;
       is_sow?: boolean;
       sow_warning?: string;
       document_type?: string;
       should_block_generation?: boolean;
     };
+
     const primaryDocument =
       documents?.find((doc) => doc.role === "primary") ??
       (typeof text === "string"
@@ -78,10 +88,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (!session_id) {
-      return NextResponse.json({ error: "Payment required" }, { status: 402 });
-    }
-
     const supportingDocsCount = (documents ?? []).filter((doc) => doc.role === "supporting").length;
     const validation = await validateSOW(primaryDocument.text, { supportingDocsCount });
     const clientSaysNotSOW = body.is_sow === false;
@@ -97,40 +103,6 @@ export async function POST(req: NextRequest) {
         },
         { status: 422 }
       );
-    }
-
-    // Verify payment
-    const stripeSession = await getStripe().checkout.sessions.retrieve(session_id);
-    if (stripeSession.payment_status !== "paid") {
-      return NextResponse.json({ error: "Payment not completed" }, { status: 402 });
-    }
-
-    // Get authenticated user
-    const supabase = await createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    // Resolve DB client early so we can use it for idempotency check
-    const hasServiceRole = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
-    if (!hasServiceRole) {
-      logger.warn("SUPABASE_SERVICE_ROLE_KEY not set; falling back to user-scoped inserts", { route: "generate" });
-    }
-    const dbClient = hasServiceRole ? createServiceClient() : supabase;
-
-    // Idempotency: if this Stripe session already produced a BOQ, return it
-    const { data: existingBoq } = await dbClient
-      .from("boqs")
-      .select("id, data")
-      .eq("stripe_session_id", session_id)
-      .maybeSingle();
-
-    if (existingBoq) {
-      return NextResponse.json({ boq: existingBoq.data, boq_id: existingBoq.id });
     }
 
     // Truncate to ~80k chars to stay within token limits
@@ -150,52 +122,67 @@ export async function POST(req: NextRequest) {
       }
     );
 
+    // Compute pricing from the generated BOQ
+    const tiers = loadTiers();
+    const pricing = computePricing(boq, tiers);
     const title = boq.project || "Untitled BOQ";
 
-    try {
-      const { data: saved, error: dbError } = await dbClient
-        .from("boqs")
-        .insert({
-          user_id: user.id,
-          title,
-          data: boq,
-          stripe_session_id: session_id,
-        })
-        .select("id")
-        .single();
-
-      if (dbError) {
-        logger.error("Failed to save BOQ to DB", { error: String(dbError), route: "generate" });
-        return NextResponse.json({ boq, boq_id: null });
-      }
-
-      
-      // Record payment when we have a saved BOQ
-      await dbClient.from("payments").upsert(
-        {
-          stripe_session_id: session_id,
-          stripe_payment_intent: stripeSession.payment_intent as string | null,
-          user_id: user.id,
-          amount_cents: stripeSession.amount_total ?? 10000,
-          currency: stripeSession.currency ?? "usd",
-          status: "completed",
-          boq_id: saved.id,
-        },
-        { onConflict: "stripe_session_id", ignoreDuplicates: false }
-      );
-
-      
-      const itemCount = boq.bills?.flatMap((b) => b.items).filter((i) => !i.is_header).length ?? 0;
-      trackEvent(user.id, "boq_generated", { boqId: saved.id, title, itemCount });
-      return NextResponse.json({ boq, boq_id: saved.id });
-    } catch (saveErr) {
-      logger.error("Failed to save BOQ or record payment", { error: String(saveErr), route: "generate" });
-      return NextResponse.json({ boq, boq_id: null });
+    const hasServiceRole = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
+    if (!hasServiceRole) {
+      logger.warn("SUPABASE_SERVICE_ROLE_KEY not set; falling back to user-scoped inserts", { route: "generate" });
     }
+    const dbClient = hasServiceRole ? createServiceClient() : supabase;
+
+    // Save BOQ as a preview (unpaid) — no stripe_session_id yet
+    const { data: saved, error: dbError } = await dbClient
+      .from("boqs")
+      .insert({
+        user_id: user.id,
+        title,
+        data: boq,
+        payment_status: "preview",
+        grand_total_zmw: pricing.grandTotalZmw,
+      })
+      .select("id")
+      .single();
+
+    if (dbError) {
+      logger.error("Failed to save preview BOQ to DB", { error: String(dbError), route: "generate" });
+      return NextResponse.json(
+        { error: "Failed to save BOQ. Please try again." },
+        { status: 500 }
+      );
+    }
+
+    trackEvent(user.id, "boq_preview_created", {
+      boqId: saved.id,
+      title,
+      billCount: pricing.billCount,
+      itemCount: pricing.itemCount,
+      grandTotalZmw: pricing.grandTotalZmw,
+      tier: pricing.tier.label,
+      amountCents: pricing.tier.usdCents,
+    });
+
+    // Return preview metadata only — NOT the full BOQ (locked until paid)
+    return NextResponse.json({
+      boq_id: saved.id,
+      amountCents: pricing.tier.usdCents,
+      boq_preview: {
+        billCount: pricing.billCount,
+        itemCount: pricing.itemCount,
+        tier: {
+          label: pricing.tier.label,
+          displayUsd: pricing.tier.displayUsd,
+          usdCents: pricing.tier.usdCents,
+        },
+        approxRangeLabel: pricing.approxRangeLabel,
+      },
+    });
   } catch (err) {
     logger.error("BOQ generation error", { error: err instanceof Error ? err.message : String(err), route: "generate" });
     const message = err instanceof Error ? err.message : "Unknown error";
-    
+
     const isExtractionFailure =
       message.includes("Could not extract BOQ structure") ||
       message.includes("no measurable items found");
