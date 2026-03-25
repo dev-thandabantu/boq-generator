@@ -7,6 +7,8 @@ import type { BOQBill, BOQDocument, BOQItem, BOQQualityScore, BOQQualitySummary 
 import { usePostHog } from "posthog-js/react";
 import { computeDeterministicQA } from "@/lib/boq-qa";
 
+const QA_FEATURE_ENABLED = false;
+
 interface DBBoq {
   id: string;
   title: string;
@@ -90,13 +92,12 @@ export default function BOQPage() {
       const { boq: row }: { boq: DBBoq } = await res.json();
       setBOQ(row.data);
       setHasSourceExcel(Boolean(row.source_excel_key));
-      setQA(row.data.qa ?? computeDeterministicQA(row.data));
       setLoading(false);
 
       // Load QA score — use cached if present, otherwise fetch
-      if (row.data.qa) {
+      if (QA_FEATURE_ENABLED && row.data.qa) {
         setQA(row.data.qa);
-      } else {
+      } else if (QA_FEATURE_ENABLED) {
         setQALoading(true);
         fetch(`/api/boqs/${id}/qa`, { method: "POST" })
           .then((r) => (r.ok ? r.json() : null))
@@ -127,7 +128,9 @@ export default function BOQPage() {
   const updateBOQ = useCallback(
     (updated: BOQDocument) => {
       setBOQ(updated);
-      setQA(computeDeterministicQA(updated));
+      if (QA_FEATURE_ENABLED) {
+        setQA(computeDeterministicQA(updated));
+      }
       setSaved(false);
       saveToDB(updated);
     },
@@ -187,8 +190,8 @@ export default function BOQPage() {
   async function handleExport() {
     if (!boq) return;
 
-    const summary = getQualitySummary(boq);
-    if (summary.qty_missing > 0 || summary.low_confidence > 0) {
+    const summary = QA_FEATURE_ENABLED ? getQualitySummary(boq) : null;
+    if (summary && (summary.qty_missing > 0 || summary.low_confidence > 0)) {
       const proceed = window.confirm(
         `There are ${summary.qty_missing} unresolved quantities and ${summary.low_confidence} low-confidence items. Export anyway?`
       );
@@ -401,8 +404,12 @@ export default function BOQPage() {
 
   if (!boq) return null;
 
-  const qualitySummary = getQualitySummary(boq);
-  const hasQuantityIssues = qualitySummary.qty_missing > 0 || qualitySummary.low_confidence > 0;
+  const qualitySummary = QA_FEATURE_ENABLED ? getQualitySummary(boq) : null;
+  const hasQuantityIssues = Boolean(
+    QA_FEATURE_ENABLED &&
+      qualitySummary &&
+      (qualitySummary.qty_missing > 0 || qualitySummary.low_confidence > 0)
+  );
 
   const grandTotal = boq.bills.reduce((sum, b) => {
     const billTotal = b.items.reduce((s, it) => {
@@ -440,13 +447,13 @@ export default function BOQPage() {
                 </span>
               </span>
             )}
-            {qaLoading && (
+            {QA_FEATURE_ENABLED && qaLoading && (
               <span className="hidden md:flex items-center gap-1.5 text-xs text-gray-200">
                 <span className="w-3 h-3 rounded-full border border-gray-600 border-t-transparent animate-spin inline-block" />
                 Scoring BOQ…
               </span>
             )}
-            {qa && <QABadge qa={qa} />}
+            {QA_FEATURE_ENABLED && qa && <QABadge qa={qa} />}
             {hasSourceExcel ? (
               <div className="relative">
                 <button
@@ -542,11 +549,11 @@ export default function BOQPage() {
           }`}
         >
           <div className="space-y-6 min-w-0">
-            {hasQuantityIssues && (
+            {QA_FEATURE_ENABLED && hasQuantityIssues && qualitySummary && (
               <div className="rounded-xl border border-amber-400/40 bg-amber-500/12 p-4 text-sm">
                 <p className="text-amber-200 font-semibold">Quantity Issues</p>
                 <p className="text-amber-50 mt-1">
-                  {qualitySummary.qty_missing} unresolved quantities, {qualitySummary.low_confidence}{" "}
+                  {qualitySummary?.qty_missing} unresolved quantities, {qualitySummary?.low_confidence}{" "}
                   low-confidence items. Export is allowed, but review these lines first.
                 </p>
               </div>
@@ -1036,7 +1043,9 @@ function ItemRow({
   return (
     <tr
       className={`border-b border-white/10 group ${
-        unresolvedQty || lowConfidence ? "bg-amber-500/[0.08] hover:bg-amber-500/[0.13]" : "hover:bg-white/[0.04]"
+        QA_FEATURE_ENABLED && (unresolvedQty || lowConfidence)
+          ? "bg-amber-500/[0.08] hover:bg-amber-500/[0.13]"
+          : "hover:bg-white/[0.04]"
       }`}
     >
       <td className="px-3 py-1.5">
@@ -1054,8 +1063,8 @@ function ItemRow({
           onChange={(e) => onUpdate("description", e.target.value)}
         />
         <div className="mt-1 flex flex-wrap gap-1.5">
-          {unresolvedQty && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-400/30 text-amber-100">Missing qty</span>}
-          {lowConfidence && (
+          {QA_FEATURE_ENABLED && unresolvedQty && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-400/30 text-amber-100">Missing qty</span>}
+          {QA_FEATURE_ENABLED && lowConfidence && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-400/30 text-orange-100">
               Low conf {((item.quantity_confidence ?? 0.4) * 100).toFixed(0)}%
             </span>
