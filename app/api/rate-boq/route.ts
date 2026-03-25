@@ -5,11 +5,18 @@ import { fillBOQRates, RateContext } from "@/lib/claude";
 import { excelToCSV } from "@/lib/excel";
 import { logger } from "@/lib/logger";
 import { trackEvent } from "@/lib/analytics";
+import type { PostgrestError } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const STORAGE_BUCKET = "boq-generator-dev";
+const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || "boq-generator-dev";
+
+function isMissingColumnError(error: PostgrestError | null, columns: string[]): boolean {
+  if (!error) return false;
+  const haystack = [error.message, error.details, error.hint, error.code].filter(Boolean).join(" ").toLowerCase();
+  return columns.some((column) => haystack.includes(column.toLowerCase()));
+}
 
 function classifyError(message: string): { status: number; safeMessage: string } {
   const lower = message.toLowerCase();
@@ -99,7 +106,7 @@ export async function POST(req: NextRequest) {
     const title = boq.project || "Rated BOQ";
 
     // Save BOQ to database
-    const { data: saved, error: dbError } = await serviceClient
+    let { data: saved, error: dbError } = await serviceClient
       .from("boqs")
       .insert({
         user_id: user.id,
@@ -113,8 +120,41 @@ export async function POST(req: NextRequest) {
       .select("id")
       .single();
 
+    if (isMissingColumnError(dbError, ["source_excel_key", "rate_col_header", "amount_col_header"])) {
+      logger.warn("Rate BOQ metadata columns missing; retrying save without Excel metadata", {
+        code: dbError?.code,
+        message: dbError?.message,
+        details: dbError?.details,
+        hint: dbError?.hint,
+        route: "rate-boq",
+      });
+
+      ({ data: saved, error: dbError } = await serviceClient
+        .from("boqs")
+        .insert({
+          user_id: user.id,
+          title,
+          data: boq,
+          stripe_session_id: session_id,
+        })
+        .select("id")
+        .single());
+    }
+
     if (dbError) {
-      logger.error("Failed to save rated BOQ", { error: String(dbError), route: "rate-boq" });
+      logger.error("Failed to save rated BOQ", {
+        error: String(dbError),
+        code: dbError.code,
+        message: dbError.message,
+        details: dbError.details,
+        hint: dbError.hint,
+        route: "rate-boq",
+      });
+      return NextResponse.json({ boq, boq_id: null });
+    }
+
+    if (!saved?.id) {
+      logger.error("Rated BOQ save returned no row id", { route: "rate-boq" });
       return NextResponse.json({ boq, boq_id: null });
     }
 

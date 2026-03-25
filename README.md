@@ -7,6 +7,8 @@ AI-powered Bill of Quantities generator for construction projects in Southern Af
 - **PDF/DOCX upload & extraction** — drag-and-drop a Scope of Work document
 - **AI-generated BOQ** — Gemini 2.5 Pro extracts line items, quantities, units, and groups them into standard trade bills
 - **Rate an existing BOQ** — upload an unrated Excel BOQ; AI fills in Zambian market rates calibrated to province, site accessibility, labour source, and margin
+- **Rate-source traceability** — rated BOQs now record the pricing basis used, plus packaged reference documents that were assessed and excluded
+- **BOQ comparison API** — compare an AI-rated BOQ against a human-priced BOQ to track coverage and pricing accuracy
 - **Stripe payment gate** — $100 per generation or rating; no account needed to pay
 - **Google OAuth auth** — sign in to save and revisit past BOQs
 - **BOQ editor** — edit rates in-browser; amounts auto-calculate; changes auto-save
@@ -78,6 +80,9 @@ GEMINI_API_KEY=<your-google-ai-key>
 
 # App URL (no trailing slash)
 NEXT_PUBLIC_APP_URL=https://your-app.vercel.app   # or http://localhost:3000 locally
+
+# Supabase Storage bucket for uploaded Excel files
+SUPABASE_STORAGE_BUCKET=boq-generator-dev
 
 # PostHog analytics
 NEXT_PUBLIC_POSTHOG_KEY=phc_...
@@ -157,7 +162,7 @@ The CLI will print a `whsec_...` secret — use that as `STRIPE_WEBHOOK_SECRET` 
 
 ### Storage bucket
 
-The app uses a Supabase Storage bucket named `boq-generator-dev` to store uploaded Excel files before rate filling. Create it in Supabase → **Storage** with private access (RLS handled by the service role key).
+The app uses `SUPABASE_STORAGE_BUCKET` (default: `boq-generator-dev`) to store uploaded Excel files before rate filling. Create that bucket in Supabase → **Storage** with private access (RLS handled by the service role key).
 
 ---
 
@@ -180,6 +185,7 @@ app/
     checkout/               # Create Stripe Checkout session
     generate/               # Gemini BOQ generation + save to DB
     rate-boq/               # Gemini rate filling for uploaded Excel BOQs
+    compare-boqs/           # Compare baseline vs candidate BOQ pricing accuracy
     ingest-boq/             # Validate + upload Excel BOQ to Storage
     boqs/                   # GET list, GET by id, PUT (auto-save)
     boqs/[id]/assistant/    # AI edit assistant (streaming + preview modes)
@@ -218,6 +224,12 @@ sentry.edge.config.ts       # Edge runtime Sentry config
 | **Sentry** | Unhandled server errors, React error boundaries, edge errors, Session Replay |
 | **PostHog** | `boq_generated`, `boq_rated`, `excel_ingested`, `payment_completed` server events + client-side page views |
 | **Structured logs** | All API routes emit JSON logs (`lib/logger.ts`) — visible in Vercel log drain |
+
+## Notes on Zambian Rate References
+
+- The current BOQ rating flow uses an embedded Zambian construction rate guide in `lib/claude.ts`.
+- The packaged file [inspo_docs/ZPPA RATES.pdf](/Users/mohara/Documents/aakitech/Saas/BOQ/boq-generator/inspo_docs/ZPPA%20RATES.pdf) is not a construction schedule of rates; it appears to be a medical/product price index, so it should not be used to price construction BOQs.
+- Rated BOQ outputs now carry `rate_reference` metadata so you can see which pricing basis was used and which packaged sources were excluded.
 | **Health check** | `GET /api/health` — returns `{ status, timestamp, db }` for uptime monitors |
 | **Rate limiting** | Upstash Redis sliding window: 10 requests / 15 min per IP on AI routes |
 

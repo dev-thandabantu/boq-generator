@@ -101,6 +101,51 @@ export interface BOQDocument {
   quality_summary?: BOQQualitySummary;
   artifacts?: BOQArtifacts;
   qa?: BOQQualityScore;
+  rate_reference?: BOQRateReference;
+}
+
+export interface BOQRateReferenceAssessment {
+  source_name: string;
+  source_path?: string;
+  relevance: "relevant" | "not_relevant" | "unknown";
+  reason: string;
+  effective_for: Array<"construction_boq_generation" | "construction_rate_filling" | "other">;
+}
+
+export interface BOQRateReference {
+  pricing_basis: string;
+  currency: string;
+  version: string;
+  assessed_sources?: BOQRateReferenceAssessment[];
+}
+
+export interface BOQComparisonMatchedItem {
+  key: string;
+  label: string;
+  baseline_rate: number;
+  candidate_rate: number;
+  absolute_delta: number;
+  percent_delta: number | null;
+  within_10pct: boolean;
+  within_20pct: boolean;
+}
+
+export interface BOQComparisonReport {
+  baseline_label: string;
+  candidate_label: string;
+  baseline_total_items: number;
+  candidate_total_items: number;
+  matched_items: number;
+  baseline_priced_items: number;
+  candidate_priced_items: number;
+  comparable_priced_items: number;
+  coverage_ratio: number;
+  within_10pct_ratio: number;
+  within_20pct_ratio: number;
+  mean_absolute_percentage_error: number | null;
+  mean_rate_delta: number | null;
+  median_rate_delta: number | null;
+  sample_matches: BOQComparisonMatchedItem[];
 }
 
 export interface BOQValidationFlag {

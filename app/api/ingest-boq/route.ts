@@ -10,7 +10,7 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB (storage bucket limit)
-const STORAGE_BUCKET = "boq-generator-dev";
+const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || "boq-generator-dev";
 
 export async function POST(req: NextRequest) {
   try {
@@ -91,9 +91,18 @@ export async function POST(req: NextRequest) {
       });
 
     if (uploadError) {
-      logger.error("Storage upload error", { error: String(uploadError), route: "ingest-boq" });
+      logger.error("Storage upload error", {
+        error: String(uploadError),
+        message: uploadError.message,
+        bucket: STORAGE_BUCKET,
+        route: "ingest-boq",
+      });
       return NextResponse.json(
-        { error: "Failed to store the uploaded file. Please try again." },
+        {
+          error:
+            uploadError.message ||
+            `Failed to store the uploaded file in bucket "${STORAGE_BUCKET}". Please verify the bucket exists and the service role key is correct.`,
+        },
         { status: 500 }
       );
     }

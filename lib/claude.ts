@@ -17,6 +17,7 @@ import type {
   BOQValidationFlag,
 } from "./types";
 import { computeDeterministicQA, mergeQAScores } from "./boq-qa";
+import { buildDefaultRateReference } from "./rate-reference";
 
 type QuantitySource = "explicit" | "derived" | "assumed";
 type SOWValidationResult = DocumentClassification;
@@ -1453,6 +1454,7 @@ Apply these adjustments consistently across all items. Transport-sensitive items
 export async function fillBOQRates(csvText: string, rateContext?: RateContext): Promise<BOQDocument> {
   const contextBlock = rateContext ? `\n\n${buildRateContextBlock(rateContext)}` : "";
   const truncated = csvText.length > 60000 ? csvText.slice(0, 60000) + "\n...[truncated]" : csvText;
+  const rateReference = buildDefaultRateReference();
 
   const raw = await generateStructuredContent<BOQDocument>({
     preferredModel: FALLBACK_MODEL,
@@ -1504,6 +1506,7 @@ PARSING RULES:
       }),
     })),
     pipeline_version: "excel-rate-v1.0",
+    rate_reference: rateReference,
   };
 }
 

@@ -144,7 +144,7 @@ function GeneratingContent() {
         if (boq_id) {
           router.push(`/boq/${boq_id}`);
         } else {
-          sessionStorage.setItem("boq_data", JSON.stringify(boq));
+          localStorage.setItem("boq_data", JSON.stringify(boq));
           router.push("/boq");
         }
       } catch (err) {
