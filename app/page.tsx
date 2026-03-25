@@ -1,4 +1,5 @@
 import Footer from "@/components/Footer";
+import { DEFAULT_PRICE_LABEL } from "@/lib/pricing";
 
 export default function LandingPage() {
   return (
@@ -35,7 +36,7 @@ export default function LandingPage() {
                 Built for Zambian construction professionals
               </div>
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-red-500/30 bg-red-500/10 text-red-300 text-xs font-medium">
-                Launch promo: $99.99 only for the next 2 weeks
+                Launch promo: {DEFAULT_PRICE_LABEL} only for the next 2 weeks
               </div>
             </div>
             <h1 className="text-5xl sm:text-6xl font-bold tracking-tight leading-tight">
@@ -55,7 +56,7 @@ export default function LandingPage() {
                 href="/upload"
                 className="w-full sm:w-auto px-8 py-4 rounded-xl bg-amber-400 hover:bg-amber-300 text-black font-bold text-base transition-colors"
               >
-                Generate your BOQ - $99.99 promo {"->"}
+                Generate your BOQ - {DEFAULT_PRICE_LABEL} promo {"->"}
               </a>
               <a
                 href="/dashboard"
@@ -136,8 +137,8 @@ export default function LandingPage() {
           <div className="inline-block rounded-2xl border border-amber-500/30 bg-[#0f0f0f] p-8 text-left min-w-[280px]">
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-red-300 mb-3">Promo price</p>
             <div className="flex items-end gap-3 mb-2">
-              <p className="text-2xl font-semibold text-gray-500 line-through">$200</p>
-              <p className="text-5xl font-bold text-amber-400">$99.99</p>
+              <p className="text-2xl font-semibold text-gray-500 line-through">$100</p>
+              <p className="text-5xl font-bold text-amber-400">{DEFAULT_PRICE_LABEL}</p>
             </div>
             <p className="text-gray-400 text-sm mb-2">USD - one-time per BOQ</p>
             <p className="text-amber-100 text-sm mb-6">Available for the first 2 weeks only before standard pricing returns.</p>

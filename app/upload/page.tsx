@@ -5,6 +5,7 @@ import { Progress } from "@/components/ui/progress";
 import Footer from "@/components/Footer";
 import { usePostHog } from "posthog-js/react";
 import type { BOQDocumentType, RequiredAttachment, SourceBundleStatus } from "@/lib/types";
+import { DEFAULT_PRICE_LABEL } from "@/lib/pricing";
 
 type Tab = "generate" | "rate";
 type Stage = "idle" | "extracting" | "ready" | "paying" | "error";
@@ -78,7 +79,7 @@ const [bundleDocs, setBundleDocs] = useState<ExtractedDoc[]>([]);
         ? "Re-check attachments"
         : "Add required attachments to continue";
     }
-    return "Pay $100 & Generate BOQ →";
+    return `Pay ${DEFAULT_PRICE_LABEL} & Generate BOQ ->`;
   }, [classification, hasAllRequiredAttachments, hasProcessedAllRequiredAttachments, stage]);
 
   function handleFile(f: File) {
@@ -554,7 +555,7 @@ const [bundleDocs, setBundleDocs] = useState<ExtractedDoc[]>([]);
               <p className="text-gray-400 text-sm mt-0.5">One-time · instant delivery</p>
             </div>
             <div className="text-right">
-              <p className="text-2xl font-bold text-amber-400">$100</p>
+              <p className="text-2xl font-bold text-amber-400">{DEFAULT_PRICE_LABEL}</p>
               <p className="text-xs text-gray-500">USD</p>
             </div>
           </div>
@@ -1015,7 +1016,7 @@ function RateBOQTab() {
               <p className="text-gray-400 text-sm mt-0.5">One-time · instant delivery</p>
             </div>
             <div className="text-right">
-              <p className="text-2xl font-bold text-amber-400">$100</p>
+              <p className="text-2xl font-bold text-amber-400">{DEFAULT_PRICE_LABEL}</p>
               <p className="text-xs text-gray-500">USD</p>
             </div>
           </div>
@@ -1041,7 +1042,7 @@ function RateBOQTab() {
           onClick={handleCheckout} disabled={stage === "paying"}>
           {stage === "paying" ? (
             <><span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-black/60 border-t-transparent animate-spin" />Opening secure checkout...</>
-          ) : "Pay $100 & Add Rates →"}
+           ) : `Pay ${DEFAULT_PRICE_LABEL} & Add Rates ->`}
         </button>
 
         <p className="text-xs text-gray-600">Secure payment via Stripe. You will be redirected back after payment.</p>
@@ -1224,3 +1225,4 @@ function ExcelIcon({ className }: { className?: string }) {
     </svg>
   );
 }
+
