@@ -1,10 +1,12 @@
 "use client";
 
+import BrandLogo from "@/components/BrandLogo";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Progress } from "@/components/ui/progress";
 import Footer from "@/components/Footer";
 import { usePostHog } from "posthog-js/react";
 import type { BOQDocumentType, RequiredAttachment, SourceBundleStatus } from "@/lib/types";
+import { DEFAULT_PRICE_LABEL } from "@/lib/pricing";
 
 type Tab = "generate" | "rate";
 type Stage = "idle" | "extracting" | "ready" | "paying" | "error";
@@ -49,8 +51,9 @@ function GenerateBOQTab() {
   } | null>(null);
   const [supportingUploads, setSupportingUploads] = useState<SupportingUpload[]>([]);
   const [primaryDoc, setPrimaryDoc] = useState<ExtractedDoc | null>(null);
-  const [bundleDocs, setBundleDocs] = useState<ExtractedDoc[]>([]);
+const [bundleDocs, setBundleDocs] = useState<ExtractedDoc[]>([]);
   const ph = usePostHog();
+  const MAX_GENERATE_FILE_SIZE = 15 * 1024 * 1024;
   const attachedSupportingCount = supportingUploads.filter((upload) => upload.file).length;
   const processedSupportingCount = supportingUploads.filter((upload) => upload.processedDoc).length;
   const hasAllRequiredAttachments =
@@ -77,16 +80,11 @@ function GenerateBOQTab() {
         ? "Re-check attachments"
         : "Add required attachments to continue";
     }
-    return "Pay $100 & Generate BOQ →";
+    return `Pay ${DEFAULT_PRICE_LABEL} & Generate BOQ ->`;
   }, [classification, hasAllRequiredAttachments, hasProcessedAllRequiredAttachments, stage]);
 
   function handleFile(f: File) {
-    const name = f.name.toLowerCase();
-    if (!name.endsWith(".pdf") && !name.endsWith(".docx")) {
-      setError("Please upload a PDF or Word (.docx) document.");
-      return;
-    }
-    setFile(f);
+    setFile(null);
     setStage("idle");
     setError(null);
     setPages(null);
@@ -96,6 +94,17 @@ function GenerateBOQTab() {
     setSupportingUploads([]);
     setPrimaryDoc(null);
     setBundleDocs([]);
+
+    const name = f.name.toLowerCase();
+    if (!name.endsWith(".pdf") && !name.endsWith(".docx")) {
+      setError("Please upload a PDF or Word (.docx) document.");
+      return;
+    }
+    if (f.size > MAX_GENERATE_FILE_SIZE) {
+      setError("File too large. Please upload a PDF or Word document smaller than 15 MB.");
+      return;
+    }
+    setFile(f);
   }
 
   async function extractSingleDocument(
@@ -115,13 +124,28 @@ function GenerateBOQTab() {
     negativeSignals?: string[];
     sowFlags?: string[];
   }> {
+    async function readErrorMessage(res: Response): Promise<string> {
+      const contentType = res.headers.get("content-type") || "";
+
+      if (contentType.includes("application/json")) {
+        const payload = (await res.json()) as { error?: string };
+        return payload.error || "Extraction failed";
+      }
+
+      const raw = (await res.text()).trim();
+      if (!raw) return "Extraction failed";
+      if (/request entity too large/i.test(raw)) {
+        return "File too large. Please upload a PDF or Word document smaller than 15 MB.";
+      }
+      return raw;
+    }
+
     const form = new FormData();
     form.append("file", documentFile);
     form.append("supporting_docs_count", String(supportingDocsCount));
     const res = await fetch("/api/extract", { method: "POST", body: form });
     if (!res.ok) {
-      const { error: e } = await res.json();
-      throw new Error(e || "Extraction failed");
+      throw new Error(await readErrorMessage(res));
     }
     return res.json();
   }
@@ -346,6 +370,9 @@ function GenerateBOQTab() {
   }
 
   const isProcessing = stage === "extracting" || stage === "paying";
+  const bundleStatusLabel = classification?.sourceBundleStatus
+    ? classification.sourceBundleStatus.replaceAll("_", " ")
+    : "complete";
 
   if (stage === "ready" || stage === "paying") {
     return (
@@ -361,98 +388,141 @@ function GenerateBOQTab() {
         </div>
 
         {classification && (
-          <div
-            className={`rounded-xl border p-4 text-left space-y-3 ${
-              classification.shouldBlockGeneration
-                ? "bg-yellow-500/10 border-yellow-500/30"
-                : "bg-green-500/10 border-green-500/30"
-            }`}
-          >
-            <div className="flex items-start gap-3">
-              <svg
-                className={`w-4 h-4 mt-0.5 shrink-0 ${
-                  classification.shouldBlockGeneration ? "text-yellow-300" : "text-green-300"
-                }`}
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-              </svg>
-              <div className="space-y-1">
-                <p className={`text-xs font-semibold ${classification.shouldBlockGeneration ? "text-yellow-200" : "text-green-200"}`}>
-                  {classification.shouldBlockGeneration ? "Upload blocked" : "Document accepted"}
-                </p>
-                <p className="text-xs text-white/90">
-                  {sowWarning ||
-                    "This document contains enough construction scope signals to proceed with BOQ generation."}
-                </p>
-                <div className="flex flex-wrap gap-2 text-[11px] text-white/80">
-                  <span className="px-2 py-1 rounded bg-white/10">
-                    Type: {classification.documentType ?? "unknown"}
-                  </span>
-                  <span className="px-2 py-1 rounded bg-white/10">
-                    Bundle: {classification.sourceBundleStatus.replaceAll("_", " ")}
-                  </span>
-                  {classification.confidence !== null && (
-                    <span className="px-2 py-1 rounded bg-white/10">
-                      Confidence: {(classification.confidence * 100).toFixed(0)}%
+          <div className="space-y-4">
+            <div
+              className={`rounded-2xl border p-6 text-left ${
+                classification.shouldBlockGeneration
+                  ? "bg-yellow-500/10 border-yellow-500/30"
+                  : "bg-green-500/10 border-green-500/30"
+              }`}
+            >
+              <div className="space-y-4">
+                <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold text-white/90">
+                  <span
+                    className={`inline-block h-2 w-2 rounded-full ${
+                      classification.shouldBlockGeneration ? "bg-yellow-300" : "bg-green-300"
+                    }`}
+                  />
+                  {classification.shouldBlockGeneration ? "Action needed" : "Ready to continue"}
+                </div>
+
+                <div className="space-y-2 text-center sm:text-left">
+                  <p className="text-2xl font-semibold text-white">
+                    {classification.shouldBlockGeneration
+                      ? "Add the missing files to continue."
+                      : "Continue to generate your BOQ."}
+                  </p>
+                  <p className="text-sm text-white/70">
+                    {sowWarning ||
+                      (classification.shouldBlockGeneration
+                        ? "Your scope passed, but the supporting bundle is incomplete."
+                        : "Your document passed the check and is ready for payment.")}
+                  </p>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_140px] sm:items-center">
+                  <div className="rounded-xl border border-white/10 bg-black/15 px-4 py-3">
+                    <p className="text-[11px] uppercase tracking-wide text-white/45">Selected file</p>
+                    <p className="mt-1 truncate text-sm text-white">{file?.name}</p>
+                  </div>
+                  <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-center min-w-0">
+                    <p className="text-[11px] uppercase tracking-wide text-white/45">Price</p>
+                    <p className="mt-1 text-2xl font-bold text-amber-400">{DEFAULT_PRICE_LABEL}</p>
+                  </div>
+                </div>
+
+                <button
+                  className="w-full py-4 rounded-xl bg-amber-400 hover:bg-amber-300 text-black font-semibold text-base transition-colors disabled:opacity-70 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
+                  onClick={handleCheckout}
+                  disabled={
+                    stage === "paying" ||
+                    isSOW === false ||
+                    (classification?.shouldBlockGeneration && hasAllRequiredAttachments && !hasProcessedAllRequiredAttachments) ||
+                    Boolean(classification?.shouldBlockGeneration && !needsAttachmentRecheck)
+                  }
+                >
+                  {stage === "paying" ? (
+                    <><span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-black/60 border-t-transparent animate-spin" />Opening secure checkout...</>
+                  ) : primaryActionLabel}
+                </button>
+
+                <div className="flex flex-wrap items-center justify-center gap-2 sm:justify-between">
+                  <div className="flex flex-wrap gap-2">
+                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs text-white/70 capitalize">
+                      {(classification.documentType ?? "unknown").replaceAll("_", " ")}
                     </span>
-                  )}
+                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs text-white/70 capitalize">
+                      {bundleStatusLabel}
+                    </span>
+                    {classification.confidence !== null && (
+                      <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs text-white/70">
+                        {`${(classification.confidence * 100).toFixed(0)}% confidence`}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    className="text-xs text-gray-400 hover:text-gray-200"
+                    onClick={() => {
+                      setFile(null);
+                      setStage("idle");
+                      setPages(null);
+                      setSowWarning(null);
+                      setIsSOW(null);
+                      setClassification(null);
+                      setSupportingUploads([]);
+                      setBundleDocs([]);
+                    }}
+                  >
+                    Change file
+                  </button>
                 </div>
               </div>
             </div>
 
-            {classification.positiveSignals.length > 0 && (
-              <div>
-                <p className="text-[11px] uppercase tracking-wide text-gray-300 mb-1">Why it passed</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {classification.positiveSignals.map((signal) => (
-                    <span key={signal} className="text-[11px] px-2 py-1 rounded bg-green-500/15 text-green-100">
-                      {signal}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {classification.negativeSignals.length > 0 && (
-              <div>
-                <p className="text-[11px] uppercase tracking-wide text-gray-300 mb-1">Why it failed</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {classification.negativeSignals.map((signal) => (
-                    <span key={signal} className="text-[11px] px-2 py-1 rounded bg-yellow-500/15 text-yellow-100">
-                      {signal}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-
             {classification.requiredAttachments.length > 0 && (
-              <div className="space-y-2">
-                <p className="text-[11px] uppercase tracking-wide text-gray-300">Required attachments</p>
+              <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-left space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium text-white">Required files</p>
+                    <p className="text-xs text-white/60">Add these before continuing.</p>
+                  </div>
+                  <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/70">
+                    {processedSupportingCount}/{classification.requiredAttachments.length} added
+                  </div>
+                </div>
                 {classification.requiredAttachments.map((attachment, index) => {
                   const current = supportingUploads[index];
+                  const statusLabel = current?.processing
+                    ? "Processing"
+                    : current?.processedDoc
+                      ? "Added"
+                      : current?.file
+                        ? "Ready"
+                        : "Needed";
+                  const statusClasses = current?.processing
+                    ? "bg-amber-500/15 text-amber-100"
+                    : current?.processedDoc
+                      ? "bg-green-500/15 text-green-100"
+                      : current?.file
+                        ? "bg-blue-500/15 text-blue-100"
+                        : "bg-white/10 text-white/70";
                   return (
-                    <div key={`${attachment.type}-${index}`} className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="text-xs text-white capitalize">{attachment.type}</p>
-                        <p className="text-[11px] text-gray-400">{attachment.reason}</p>
-                        {current?.file && (
-                          <p className="text-[11px] text-green-200 mt-1 truncate">{current.file.name}</p>
-                        )}
-                        {current?.processing && (
-                          <p className="text-[11px] text-amber-200 mt-1">Processing attachment...</p>
-                        )}
-                        {current?.processedDoc && !current.processing && (
-                          <p className="text-[11px] text-green-300 mt-1">
-                            Added to source bundle as {current.processedDoc.document_id}
+                    <div key={`${attachment.type}-${index}`} className="rounded-xl border border-white/10 bg-black/10 px-4 py-3 flex items-center justify-between gap-4">
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-medium text-white capitalize">
+                            {attachment.type.replaceAll("_", " ")}
                           </p>
+                          <span className={`rounded-full px-2 py-0.5 text-[11px] ${statusClasses}`}>
+                            {statusLabel}
+                          </span>
+                        </div>
+                        <p className="text-xs text-white/60">{attachment.reason}</p>
+                        {current?.file && (
+                          <p className="text-[11px] text-white/75 truncate">{current.file.name}</p>
                         )}
                         {current?.error && (
-                          <p className="text-[11px] text-red-300 mt-1">{current.error}</p>
+                          <p className="text-[11px] text-red-300">{current.error}</p>
                         )}
                       </div>
                       <div className="shrink-0">
@@ -481,76 +551,23 @@ function GenerateBOQTab() {
               </div>
             )}
 
-            {bundleDocs.length > 0 && (
-              <div>
-                <p className="text-[11px] uppercase tracking-wide text-gray-300 mb-1">Source bundle</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {bundleDocs.map((doc) => (
-                    <span key={doc.document_id} className="text-[11px] px-2 py-1 rounded bg-white/10 text-gray-100">
-                      {doc.role === "primary" ? "Primary" : "Attachment"}: {doc.name}
-                    </span>
-                  ))}
-                </div>
-                <p className="text-[11px] text-gray-400 mt-2">
-                  {bundleDocs.length} document{bundleDocs.length === 1 ? "" : "s"} ready for generation.
-                  {" "}
-                  {processedSupportingCount > 0
-                    ? `${processedSupportingCount} attachment${processedSupportingCount === 1 ? "" : "s"} processed.`
-                    : "No supporting attachments processed yet."}
-                </p>
+            <details className="rounded-xl border border-white/10 bg-white/[0.02] p-4 text-left">
+              <summary className="cursor-pointer list-none text-sm font-medium text-white flex items-center justify-between gap-3">
+                Review document details
+                <span className="text-xs text-white/45">
+                  {bundleDocs.length} file{bundleDocs.length === 1 ? "" : "s"}
+                </span>
+              </summary>
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {bundleDocs.map((doc) => (
+                  <span key={doc.document_id} className="text-[11px] px-2 py-1 rounded bg-white/10 text-gray-100">
+                    {doc.role === "primary" ? "Primary" : "Attachment"}
+                  </span>
+                ))}
               </div>
-            )}
+            </details>
           </div>
         )}
-
-        <div className="flex items-center gap-3 px-4 py-3 rounded-lg bg-white/[0.03] border border-white/10 text-left">
-          <div className="w-8 h-8 rounded bg-amber-500/20 flex items-center justify-center shrink-0">
-            <FileIcon className="w-4 h-4 text-amber-400" />
-          </div>
-          <p className="text-sm text-white truncate flex-1">{file?.name}</p>
-          <button
-            className="text-xs text-gray-500 hover:text-gray-300 shrink-0"
-            onClick={() => {
-              setFile(null);
-              setStage("idle");
-              setPages(null);
-              setSowWarning(null);
-              setIsSOW(null);
-              setClassification(null);
-              setSupportingUploads([]);
-              setBundleDocs([]);
-            }}
-          >
-            Change
-          </button>
-        </div>
-
-        <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-6 text-left space-y-4">
-          <div className="flex items-start justify-between">
-            <div>
-              <p className="text-white font-semibold text-lg">BOQ Generation</p>
-              <p className="text-gray-400 text-sm mt-0.5">One-time · instant delivery</p>
-            </div>
-            <div className="text-right">
-              <p className="text-2xl font-bold text-amber-400">$100</p>
-              <p className="text-xs text-gray-500">USD</p>
-            </div>
-          </div>
-          <ul className="space-y-2">
-            {[
-              "Structured BOQ with bill sections",
-              "Editable table — adjust quantities & descriptions",
-              "Download .xlsx in Zambian tender format (ZMW)",
-            ].map((item) => (
-              <li key={item} className="flex items-start gap-2 text-sm text-gray-300">
-                <svg className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
-                </svg>
-                {item}
-              </li>
-            ))}
-          </ul>
-        </div>
 
         <label className="flex items-start gap-3 cursor-pointer select-none group">
           <div className="relative mt-0.5 shrink-0">
@@ -564,21 +581,6 @@ function GenerateBOQTab() {
             <p className="text-xs text-gray-500 mt-0.5">AI suggests typical ZMW rates based on the Zambian construction market. Review and adjust before use.</p>
           </div>
         </label>
-
-        <button
-          className="w-full py-3.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-black font-semibold text-sm transition-colors disabled:opacity-70 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
-          onClick={handleCheckout}
-          disabled={
-            stage === "paying" ||
-            isSOW === false ||
-            (classification?.shouldBlockGeneration && hasAllRequiredAttachments && !hasProcessedAllRequiredAttachments) ||
-            Boolean(classification?.shouldBlockGeneration && !needsAttachmentRecheck)
-          }
-        >
-          {stage === "paying" ? (
-            <><span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-black/60 border-t-transparent animate-spin" />Opening secure checkout...</>
-          ) : primaryActionLabel}
-        </button>
 
         <p className="text-xs text-gray-600">Secure payment via Stripe. You will be redirected back after payment.</p>
 
@@ -993,7 +995,7 @@ function RateBOQTab() {
               <p className="text-gray-400 text-sm mt-0.5">One-time · instant delivery</p>
             </div>
             <div className="text-right">
-              <p className="text-2xl font-bold text-amber-400">$100</p>
+              <p className="text-2xl font-bold text-amber-400">{DEFAULT_PRICE_LABEL}</p>
               <p className="text-xs text-gray-500">USD</p>
             </div>
           </div>
@@ -1019,7 +1021,7 @@ function RateBOQTab() {
           onClick={handleCheckout} disabled={stage === "paying"}>
           {stage === "paying" ? (
             <><span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-black/60 border-t-transparent animate-spin" />Opening secure checkout...</>
-          ) : "Pay $100 & Add Rates →"}
+           ) : `Pay ${DEFAULT_PRICE_LABEL} & Add Rates ->`}
         </button>
 
         <p className="text-xs text-gray-600">Secure payment via Stripe. You will be redirected back after payment.</p>
@@ -1126,9 +1128,7 @@ export default function UploadPage() {
       {/* Nav */}
       <nav className="fixed top-0 left-0 right-0 z-20 border-b border-white/5 bg-[#0f0f0f]/80 backdrop-blur">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <a href="/" className="text-sm font-semibold text-white">
-            BOQ <span className="text-amber-400">Generator</span>
-          </a>
+          <BrandLogo size="sm" />
           <a href="/dashboard" className="text-xs text-gray-500 hover:text-gray-300 transition-colors">
             My BOQs →
           </a>
@@ -1142,9 +1142,7 @@ export default function UploadPage() {
 
       <div className="relative z-10 w-full max-w-xl animate-fade-up">
         <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold tracking-tight mb-3">
-            BOQ <span className="text-amber-400">Generator</span>
-          </h1>
+          <BrandLogo size="lg" className="justify-center" />
         </div>
 
         {/* Tab switcher */}
@@ -1202,3 +1200,6 @@ function ExcelIcon({ className }: { className?: string }) {
     </svg>
   );
 }
+
+
+

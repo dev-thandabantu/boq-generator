@@ -2,6 +2,7 @@ import { logger } from "@/lib/logger";
 import { NextRequest, NextResponse } from "next/server";
 import { getStripe } from "@/lib/stripe";
 import { createClient } from "@/lib/supabase/server";
+import { DEFAULT_PRICE_CENTS, DEFAULT_PRICE_LABEL } from "@/lib/pricing";
 
 export const runtime = "nodejs";
 
@@ -48,12 +49,12 @@ export async function POST(req: NextRequest) {
         {
           price_data: {
             currency: "usd",
-            unit_amount: 10000, // $100.00
+            unit_amount: DEFAULT_PRICE_CENTS,
             product_data: {
               name: isRateBoq ? "BOQ Rate Filling" : "BOQ Generation",
               description: isRateBoq
-                ? "AI fills missing rates in your existing Bill of Quantities"
-                : `AI-generated Bill of Quantities for: ${filename || "your project"}`,
+                ? `AI fills missing rates in your existing Bill of Quantities at ${DEFAULT_PRICE_LABEL}`
+                : `AI-generated Bill of Quantities for: ${filename || "your project"} at ${DEFAULT_PRICE_LABEL}`,
             },
           },
           quantity: 1,

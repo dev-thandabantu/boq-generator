@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import Stripe from "stripe";
 import { logger } from "@/lib/logger";
 import { trackEvent } from "@/lib/analytics";
+import { DEFAULT_PRICE_CENTS } from "@/lib/pricing";
 
 export const runtime = "nodejs";
 
@@ -53,7 +54,7 @@ export async function POST(req: NextRequest) {
         stripe_session_id: session.id,
         stripe_payment_intent: session.payment_intent as string | null,
         user_id: userId,
-        amount_cents: session.amount_total ?? 10000,
+        amount_cents: session.amount_total ?? DEFAULT_PRICE_CENTS,
         currency: session.currency ?? "usd",
         status: "completed",
       },

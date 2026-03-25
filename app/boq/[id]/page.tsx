@@ -7,6 +7,8 @@ import type { BOQBill, BOQDocument, BOQItem, BOQQualityScore, BOQQualitySummary 
 import { usePostHog } from "posthog-js/react";
 import { computeDeterministicQA } from "@/lib/boq-qa";
 
+const QA_FEATURE_ENABLED = false;
+
 interface DBBoq {
   id: string;
   title: string;
@@ -90,13 +92,12 @@ export default function BOQPage() {
       const { boq: row }: { boq: DBBoq } = await res.json();
       setBOQ(row.data);
       setHasSourceExcel(Boolean(row.source_excel_key));
-      setQA(row.data.qa ?? computeDeterministicQA(row.data));
       setLoading(false);
 
       // Load QA score — use cached if present, otherwise fetch
-      if (row.data.qa) {
+      if (QA_FEATURE_ENABLED && row.data.qa) {
         setQA(row.data.qa);
-      } else {
+      } else if (QA_FEATURE_ENABLED) {
         setQALoading(true);
         fetch(`/api/boqs/${id}/qa`, { method: "POST" })
           .then((r) => (r.ok ? r.json() : null))
@@ -127,7 +128,9 @@ export default function BOQPage() {
   const updateBOQ = useCallback(
     (updated: BOQDocument) => {
       setBOQ(updated);
-      setQA(computeDeterministicQA(updated));
+      if (QA_FEATURE_ENABLED) {
+        setQA(computeDeterministicQA(updated));
+      }
       setSaved(false);
       saveToDB(updated);
     },
@@ -187,8 +190,8 @@ export default function BOQPage() {
   async function handleExport() {
     if (!boq) return;
 
-    const summary = getQualitySummary(boq);
-    if (summary.qty_missing > 0 || summary.low_confidence > 0) {
+    const summary = QA_FEATURE_ENABLED ? getQualitySummary(boq) : null;
+    if (summary && (summary.qty_missing > 0 || summary.low_confidence > 0)) {
       const proceed = window.confirm(
         `There are ${summary.qty_missing} unresolved quantities and ${summary.low_confidence} low-confidence items. Export anyway?`
       );
@@ -401,8 +404,13 @@ export default function BOQPage() {
 
   if (!boq) return null;
 
-  const qualitySummary = getQualitySummary(boq);
-  const hasQuantityIssues = qualitySummary.qty_missing > 0 || qualitySummary.low_confidence > 0;
+  const qualitySummary = QA_FEATURE_ENABLED ? getQualitySummary(boq) : null;
+  const hasQuantityIssues = Boolean(
+    QA_FEATURE_ENABLED &&
+      qualitySummary &&
+      (qualitySummary.qty_missing > 0 || qualitySummary.low_confidence > 0)
+  );
+  const totalItems = boq.bills.reduce((sum, bill) => sum + bill.items.filter((item) => !item.is_header).length, 0);
 
   const grandTotal = boq.bills.reduce((sum, b) => {
     const billTotal = b.items.reduce((s, it) => {
@@ -420,13 +428,19 @@ export default function BOQPage() {
           <div className="flex items-center gap-4 min-w-0">
             <button
               onClick={() => router.push("/dashboard")}
-              className="text-gray-300 hover:text-white text-sm shrink-0"
+              className="shrink-0 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-gray-200 hover:bg-white/10 hover:text-white transition-colors"
             >
               ← Dashboard
             </button>
             <div className="min-w-0">
-              <p className="text-xs text-gray-300 truncate">{boq.location}</p>
-              <h1 className="text-sm font-semibold text-white truncate">{boq.project}</h1>
+              <a
+                href="/"
+                className="inline-block text-[11px] uppercase tracking-[0.18em] text-amber-300/80 truncate hover:text-amber-200 transition-colors"
+              >
+                BOQ Workspace
+              </a>
+              <h1 className="text-lg sm:text-xl font-semibold text-white truncate">{boq.project}</h1>
+              <p className="text-xs text-gray-400 truncate">{boq.location}</p>
             </div>
           </div>
 
@@ -440,13 +454,13 @@ export default function BOQPage() {
                 </span>
               </span>
             )}
-            {qaLoading && (
+            {QA_FEATURE_ENABLED && qaLoading && (
               <span className="hidden md:flex items-center gap-1.5 text-xs text-gray-200">
                 <span className="w-3 h-3 rounded-full border border-gray-600 border-t-transparent animate-spin inline-block" />
                 Scoring BOQ…
               </span>
             )}
-            {qa && <QABadge qa={qa} />}
+            {QA_FEATURE_ENABLED && qa && <QABadge qa={qa} />}
             {hasSourceExcel ? (
               <div className="relative">
                 <button
@@ -503,28 +517,46 @@ export default function BOQPage() {
           </div>
         </div>
 
-        <div className="max-w-[1500px] mx-auto px-4 pb-2 flex flex-wrap gap-4 text-xs text-gray-300">
-          <MetaField
-            label="Project"
-            value={boq.project}
-            onChange={(v) => updateBOQ({ ...boq, project: v })}
-          />
-          <MetaField
-            label="Location"
-            value={boq.location}
-            onChange={(v) => updateBOQ({ ...boq, location: v })}
-          />
-          <MetaField
-            label="Prepared by"
-            value={boq.prepared_by}
-            onChange={(v) => updateBOQ({ ...boq, prepared_by: v })}
-          />
-          <MetaField label="Date" value={boq.date} onChange={(v) => updateBOQ({ ...boq, date: v })} />
+        <div className="max-w-[1500px] mx-auto px-4 pb-4">
+          <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium text-white">Project details</p>
+                <p className="text-xs text-gray-400">Keep these details current before exporting or sharing the BOQ.</p>
+              </div>
+              <div className="flex flex-wrap gap-2 text-[11px]">
+                <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-gray-200">
+                  {boq.bills.length} bill{boq.bills.length === 1 ? "" : "s"}
+                </span>
+                <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-gray-200">
+                  {totalItems} item{totalItems === 1 ? "" : "s"}
+                </span>
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <MetaField
+                label="Project"
+                value={boq.project}
+                onChange={(v) => updateBOQ({ ...boq, project: v })}
+              />
+              <MetaField
+                label="Location"
+                value={boq.location}
+                onChange={(v) => updateBOQ({ ...boq, location: v })}
+              />
+              <MetaField
+                label="Prepared by"
+                value={boq.prepared_by}
+                onChange={(v) => updateBOQ({ ...boq, prepared_by: v })}
+              />
+              <MetaField label="Date" value={boq.date} onChange={(v) => updateBOQ({ ...boq, date: v })} />
+            </div>
+          </div>
         </div>
       </header>
 
      
-      <main className="max-w-[1500px] mx-auto px-2 sm:px-4 py-6 space-y-4">
+      <main className="max-w-[1500px] mx-auto px-2 sm:px-4 py-6 space-y-5">
         {!assistantPaneOpen && (
           <div className="hidden xl:flex justify-end">
             <button
@@ -542,11 +574,11 @@ export default function BOQPage() {
           }`}
         >
           <div className="space-y-6 min-w-0">
-            {hasQuantityIssues && (
+            {QA_FEATURE_ENABLED && hasQuantityIssues && qualitySummary && (
               <div className="rounded-xl border border-amber-400/40 bg-amber-500/12 p-4 text-sm">
                 <p className="text-amber-200 font-semibold">Quantity Issues</p>
                 <p className="text-amber-50 mt-1">
-                  {qualitySummary.qty_missing} unresolved quantities, {qualitySummary.low_confidence}{" "}
+                  {qualitySummary?.qty_missing} unresolved quantities, {qualitySummary?.low_confidence}{" "}
                   low-confidence items. Export is allowed, but review these lines first.
                 </p>
               </div>
@@ -590,9 +622,12 @@ export default function BOQPage() {
               />
             ))}
 
-            <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 flex justify-between items-center">
-              <span className="font-bold text-white">TOTAL (VAT EXCLUSIVE)</span>
-              <span className="font-mono font-bold text-amber-400 text-lg">
+            <div className="rounded-2xl border border-amber-500/20 bg-gradient-to-r from-amber-500/10 to-transparent p-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.16em] text-amber-200/80">Project total</p>
+                <span className="font-bold text-white">TOTAL (VAT EXCLUSIVE)</span>
+              </div>
+              <span className="font-mono font-bold text-amber-400 text-xl">
                 ZMW {grandTotal.toLocaleString("en-ZM", { minimumFractionDigits: 2 })}
               </span>
             </div>
@@ -732,25 +767,25 @@ function AssistantPanel({
   ];
 
   return (
-    <section className="rounded-xl border border-amber-400/35 bg-[#17130e] h-[calc(100dvh-9rem)] max-h-[calc(100dvh-9rem)] min-h-[520px] flex flex-col overflow-hidden">
-      <div className="px-4 py-3 border-b border-amber-400/30 bg-[#1b1711]">
+    <section className="rounded-2xl border border-white/10 bg-[#121417] h-[calc(100dvh-9rem)] max-h-[calc(100dvh-9rem)] min-h-[520px] flex flex-col overflow-hidden shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
+      <div className="px-4 py-4 border-b border-white/10 bg-white/[0.03]">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h2 className="text-sm font-semibold text-amber-100">AI BOQ Assistant</h2>
-            <p className="text-[11px] text-gray-100 mt-0.5">
+            <h2 className="text-sm font-semibold text-white">AI BOQ Assistant</h2>
+            <p className="text-[11px] text-gray-400 mt-0.5">
               BOQ-only edits. Generate proposal, review diff, then apply.
             </p>
           </div>
           <button
             onClick={onUndo}
             disabled={undoCount === 0 || assistantBusy}
-            className="px-2.5 py-1 rounded-md text-[11px] bg-white/10 hover:bg-white/15 text-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="px-2.5 py-1 rounded-md text-[11px] border border-white/10 bg-white/[0.04] hover:bg-white/[0.08] text-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Undo ({undoCount})
           </button>
         </div>
         {assistantStatus && (
-          <div className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-amber-500/15 border border-amber-500/30 px-2.5 py-1 text-[11px] text-amber-200">
+          <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 text-[11px] text-amber-200">
             <span className="w-2.5 h-2.5 rounded-full border border-amber-300/60 border-t-transparent animate-spin shrink-0" />
             {assistantStatus}
           </div>
@@ -759,7 +794,7 @@ function AssistantPanel({
 
       <div className="flex-1 min-h-0 overflow-y-auto p-3 flex flex-col gap-3">
         {showWelcome ? (
-          <div className="rounded-lg border border-white/25 bg-white/[0.06] p-3 space-y-3">
+          <div className="rounded-xl border border-white/10 bg-white/[0.04] p-4 space-y-3">
             <p className="text-xs text-white leading-relaxed">
               Tell me what to change in this BOQ and I will generate a safe proposal first.
             </p>
@@ -769,7 +804,7 @@ function AssistantPanel({
                   key={prompt}
                   onClick={() => onPickPrompt(prompt)}
                   disabled={assistantBusy}
-                  className="text-left px-2.5 py-2 rounded-md bg-white/15 hover:bg-white/25 text-[11px] text-white"
+                  className="text-left px-3 py-2 rounded-lg border border-white/10 bg-white/[0.05] hover:bg-white/[0.09] text-[11px] text-white transition-colors"
                 >
                   {prompt}
                 </button>
@@ -777,15 +812,15 @@ function AssistantPanel({
             </div>
           </div>
         ) : (
-          <div className="flex-1 min-h-[280px] rounded-lg border border-white/20 bg-[#0e0d0a] overflow-hidden">
+          <div className="flex-1 min-h-[280px] rounded-xl border border-white/10 bg-[#0d1014] overflow-hidden">
             <div ref={threadRef} className="h-full overflow-y-auto p-2.5 space-y-2">
               {assistantMessages.map((message, idx) => (
                 <div
                   key={idx}
                   className={`max-w-[95%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
                     message.role === "user"
-                      ? "ml-auto bg-white/16 text-white border border-white/30"
-                      : "mr-auto bg-amber-500/16 text-amber-50 border border-amber-400/35"
+                      ? "ml-auto bg-white/[0.09] text-white border border-white/10"
+                      : "mr-auto bg-amber-500/10 text-amber-50 border border-amber-400/20"
                   }`}
                 >
                   <span className="block text-[10px] uppercase tracking-wide opacity-70 mb-1">
@@ -813,7 +848,7 @@ function AssistantPanel({
                 key={prompt}
                 onClick={() => onPickPrompt(prompt)}
                 disabled={assistantBusy}
-                className="px-2.5 py-1 rounded-md bg-white/15 hover:bg-white/25 text-[11px] text-white"
+                className="px-2.5 py-1.5 rounded-lg border border-white/10 bg-white/[0.05] hover:bg-white/[0.09] text-[11px] text-white transition-colors"
               >
                 {prompt}
               </button>
@@ -822,7 +857,7 @@ function AssistantPanel({
         )}
 
         {assistantPreview && (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+          <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-3">
             <p className="text-xs text-amber-100 font-semibold mb-1">Preview ready</p>
             <p className="text-xs text-white mb-2">{assistantPreview.summary}</p>
             <div className="flex flex-wrap gap-2 mb-3 text-[11px] text-white">
@@ -856,8 +891,8 @@ function AssistantPanel({
           </div>
         )}
       </div>
-      <div className="space-y-2 p-3 border-t border-white/20 bg-[#17130e]">
-        <label className="text-[11px] text-gray-100">Instruction</label>
+      <div className="space-y-2 p-3 border-t border-white/10 bg-white/[0.03]">
+        <label className="text-[11px] text-gray-300">Instruction</label>
         <textarea
           className="boq-cell-editable text-white w-full min-h-[76px]"
           placeholder="Example: Add a new bill for Drainage Works and include 3 typical items with units and qty 1 where missing."
@@ -892,10 +927,10 @@ function MetaField({
   onChange: (v: string) => void;
 }) {
   return (
-    <div className="flex items-center gap-1.5">
-      <span className="text-gray-200">{label}:</span>
+    <div className="rounded-xl border border-white/10 bg-[#101317] px-3 py-3">
+      <span className="block text-[11px] uppercase tracking-[0.16em] text-gray-400 mb-2">{label}</span>
       <input
-        className="boq-cell-editable text-white text-xs min-w-[100px] max-w-[200px]"
+        className="boq-cell-editable text-white text-sm w-full"
         value={value}
         onChange={(e) => onChange(e.target.value)}
       />
@@ -925,19 +960,19 @@ function BillSection({
   }, 0);
 
   return (
-    <div className="rounded-xl border border-white/15 overflow-hidden">
+    <div className="rounded-2xl border border-white/10 bg-[#0f1318] overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
       <button
-        className="w-full flex items-center justify-between px-4 py-3 bg-[#1c1f25] hover:bg-[#22262e] transition-colors"
+        className="w-full flex items-center justify-between px-4 py-4 bg-white/[0.04] hover:bg-white/[0.06] transition-colors"
         onClick={() => setOpen((o) => !o)}
       >
         <div className="flex items-center gap-3">
-          <span className="text-xs text-gray-200 font-mono">BILL {bill.number}</span>
+          <span className="rounded-full border border-amber-400/15 bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-200 font-mono">BILL {bill.number}</span>
           <span className="font-semibold text-white text-sm">{bill.title}</span>
-          <span className="text-xs text-gray-200">({bill.items.filter((i) => !i.is_header).length} items)</span>
+          <span className="text-xs text-gray-400">{bill.items.filter((i) => !i.is_header).length} items</span>
         </div>
         <div className="flex items-center gap-4">
           {billTotal > 0 && (
-            <span className="text-xs font-mono text-amber-400">
+            <span className="text-xs font-mono text-amber-300">
               ZMW {billTotal.toLocaleString("en-ZM", { minimumFractionDigits: 2 })}
             </span>
           )}
@@ -949,13 +984,13 @@ function BillSection({
         <div className="overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
-              <tr className="bg-[#141922] text-gray-100 border-b border-white/10">
-                <th className="px-3 py-2 text-left w-[70px]">ITEM</th>
-                <th className="px-3 py-2 text-left">DESCRIPTION</th>
-                <th className="px-2 py-2 text-center w-[60px]">UNIT</th>
-                <th className="px-2 py-2 text-right w-[70px]">QTY</th>
-                <th className="px-2 py-2 text-right w-[100px]">RATE (ZMW)</th>
-                <th className="px-2 py-2 text-right w-[110px]">AMOUNT (ZMW)</th>
+              <tr className="bg-[#131922] text-gray-300 border-b border-white/10">
+                <th className="px-3 py-3 text-left w-[70px] text-[11px] uppercase tracking-[0.14em]">Item</th>
+                <th className="px-3 py-3 text-left text-[11px] uppercase tracking-[0.14em]">Description</th>
+                <th className="px-2 py-3 text-center w-[60px] text-[11px] uppercase tracking-[0.14em]">Unit</th>
+                <th className="px-2 py-3 text-right w-[70px] text-[11px] uppercase tracking-[0.14em]">Qty</th>
+                <th className="px-2 py-3 text-right w-[100px] text-[11px] uppercase tracking-[0.14em]">Rate (ZMW)</th>
+                <th className="px-2 py-3 text-right w-[110px] text-[11px] uppercase tracking-[0.14em]">Amount (ZMW)</th>
                 <th className="w-[30px]" />
               </tr>
             </thead>
@@ -971,10 +1006,10 @@ function BillSection({
             </tbody>
           </table>
 
-          <div className="flex items-center justify-between px-4 py-2 bg-[#12161e] border-t border-white/10">
+          <div className="flex items-center justify-between px-4 py-3 bg-white/[0.03] border-t border-white/10">
             <button
               onClick={onAddItem}
-              className="text-xs text-gray-200 hover:text-amber-300 transition-colors"
+              className="inline-flex items-center rounded-lg border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-gray-100 hover:bg-white/[0.08] transition-colors"
             >
               + Add item
             </button>
@@ -1020,7 +1055,7 @@ function ItemRow({
 
   if (item.is_header) {
     return (
-      <tr className="border-b border-white/10 bg-[#1a1f28]">
+      <tr className="border-b border-white/10 bg-[#171d26]">
         <td colSpan={6} className="px-3 py-2 text-gray-100 font-semibold text-xs uppercase tracking-wide">
           {item.description}
         </td>
@@ -1036,7 +1071,9 @@ function ItemRow({
   return (
     <tr
       className={`border-b border-white/10 group ${
-        unresolvedQty || lowConfidence ? "bg-amber-500/[0.08] hover:bg-amber-500/[0.13]" : "hover:bg-white/[0.04]"
+        QA_FEATURE_ENABLED && (unresolvedQty || lowConfidence)
+          ? "bg-amber-500/[0.08] hover:bg-amber-500/[0.13]"
+          : "hover:bg-white/[0.04]"
       }`}
     >
       <td className="px-3 py-1.5">
@@ -1054,13 +1091,13 @@ function ItemRow({
           onChange={(e) => onUpdate("description", e.target.value)}
         />
         <div className="mt-1 flex flex-wrap gap-1.5">
-          {unresolvedQty && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-400/30 text-amber-100">Missing qty</span>}
-          {lowConfidence && (
+          {QA_FEATURE_ENABLED && unresolvedQty && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-400/30 text-amber-100">Missing qty</span>}
+          {QA_FEATURE_ENABLED && lowConfidence && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-400/30 text-orange-100">
               Low conf {((item.quantity_confidence ?? 0.4) * 100).toFixed(0)}%
             </span>
           )}
-          {evidenceLabel && (
+          {QA_FEATURE_ENABLED && evidenceLabel && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-400/20 text-sky-100">
               {evidenceLabel} evidence
             </span>
