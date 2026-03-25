@@ -5,6 +5,7 @@ import { excelToCSV } from "@/lib/excel";
 import { randomUUID } from "crypto";
 import { logger } from "@/lib/logger";
 import { trackEvent } from "@/lib/analytics";
+import { getTierForItemCount, loadRateTiers } from "@/lib/pricing";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -98,12 +99,41 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Compute pricing tier based on item count (no rates to sum yet)
+    const rateTiers = loadRateTiers();
+    const pricingTier = getTierForItemCount(validation.totalItems ?? 0, rateTiers);
+
+    // Save a preview BOQ row so the boq_id can be passed through checkout → rate-boq
+    const { data: previewBoq, error: dbError } = await serviceClient
+      .from("boqs")
+      .insert({
+        user_id: user.id,
+        title: file.name.replace(/\.[^/.]+$/, "") || "Untitled BOQ",
+        data: {},           // placeholder — filled by rate-boq after payment
+        payment_status: "preview",
+        source_excel_key: storageKey,
+        rate_col_header: validation.rateColumnHeader ?? null,
+        amount_col_header: validation.amountColumnHeader ?? null,
+      })
+      .select("id")
+      .single();
+
+    if (dbError) {
+      logger.error("Failed to save preview BOQ for rate_boq", { error: String(dbError), route: "ingest-boq" });
+      // Non-fatal: return without boq_id; checkout will fall back to legacy flow
+    }
+
     trackEvent(user.id, "excel_ingested", {
       totalItems: validation.totalItems,
       missingRateCount: validation.missingRateCount,
+      pricingTier: pricingTier.label,
+      amountCents: pricingTier.usdCents,
     });
+
     return NextResponse.json({
       storageKey,
+      boq_id: previewBoq?.id ?? null,
+      amountCents: pricingTier.usdCents,
       preview: {
         totalItems: validation.totalItems,
         missingRateCount: validation.missingRateCount,
