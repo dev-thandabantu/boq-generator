@@ -28,7 +28,7 @@ function looksLikeNonBOQItem(description: string): boolean {
 }
 
 function nonHeaderItems(boq: BOQDocument): BOQItem[] {
-  return boq.bills.flatMap((bill) => bill.items.filter((item) => !item.is_header));
+  return (boq.bills ?? []).flatMap((bill) => (bill.items ?? []).filter((item) => !item.is_header));
 }
 
 function clampScore(value: number): number {
