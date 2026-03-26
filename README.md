@@ -24,7 +24,7 @@ AI-powered Bill of Quantities generator for construction projects in Southern Af
 | Framework | Next.js 15 (App Router) |
 | Language | TypeScript |
 | Auth + DB | Supabase (Postgres + Row Level Security) |
-| AI | Google Gemini 2.5 Pro (primary) / 2.5 Flash (fallback) |
+| AI | Google Gemini with workflow-specific model routing (Flash-first for BOQ rating, Pro-first for SOW generation) |
 | Payments | Stripe Checkout |
 | Deployment | Vercel |
 | Styling | Tailwind CSS |
@@ -77,6 +77,17 @@ STRIPE_WEBHOOK_SECRET=whsec_...        # from Stripe dashboard → Webhooks
 
 # Gemini
 GEMINI_API_KEY=<your-google-ai-key>
+GEMINI_MODEL_PRIMARY=gemini-2.5-pro
+GEMINI_MODEL_FALLBACK=gemini-2.5-flash
+
+# Optional workflow-specific Gemini overrides
+# Existing BOQ rating: prefer speed and structured output stability
+GEMINI_RATE_MODEL_PRIMARY=gemini-2.5-flash
+GEMINI_RATE_MODEL_FALLBACK=gemini-2.5-pro
+
+# SOW generation / extraction: prefer stronger reasoning
+GEMINI_SOW_MODEL_PRIMARY=gemini-2.5-pro
+GEMINI_SOW_MODEL_FALLBACK=gemini-2.5-flash
 
 # App URL (no trailing slash)
 NEXT_PUBLIC_APP_URL=https://your-app.vercel.app   # or http://localhost:3000 locally

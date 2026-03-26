@@ -70,12 +70,26 @@ type QuantityPassResponse = {
   }>;
 };
 
-const PRIMARY_MODEL = process.env.GEMINI_MODEL_PRIMARY || "gemini-2.5-pro";
-const FALLBACK_MODEL = process.env.GEMINI_MODEL_FALLBACK || "gemini-2.5-flash";
+const SHARED_PRIMARY_MODEL = process.env.GEMINI_MODEL_PRIMARY || "gemini-2.5-pro";
+const SHARED_FALLBACK_MODEL = process.env.GEMINI_MODEL_FALLBACK || "gemini-2.5-flash";
+const SOW_PRIMARY_MODEL =
+  process.env.GEMINI_SOW_MODEL_PRIMARY || SHARED_PRIMARY_MODEL || "gemini-2.5-pro";
+const SOW_FALLBACK_MODEL =
+  process.env.GEMINI_SOW_MODEL_FALLBACK || SHARED_FALLBACK_MODEL || "gemini-2.5-flash";
+const RATE_PRIMARY_MODEL =
+  process.env.GEMINI_RATE_MODEL_PRIMARY || SHARED_FALLBACK_MODEL || "gemini-2.5-flash";
+const RATE_FALLBACK_MODEL =
+  process.env.GEMINI_RATE_MODEL_FALLBACK || SHARED_PRIMARY_MODEL || "gemini-2.5-pro";
 const MAX_ATTEMPTS_PER_MODEL = 3;
 const RATE_FILL_BATCH_SIZE = 24;
-const MODEL_CANDIDATES = Array.from(
-  new Set([PRIMARY_MODEL, FALLBACK_MODEL, "gemini-2.5-flash"].filter(Boolean))
+const DEFAULT_MODEL_CANDIDATES = Array.from(
+  new Set([SHARED_PRIMARY_MODEL, SHARED_FALLBACK_MODEL, "gemini-2.5-flash"].filter(Boolean))
+);
+const SOW_MODEL_CANDIDATES = Array.from(
+  new Set([SOW_PRIMARY_MODEL, SOW_FALLBACK_MODEL, "gemini-2.5-flash"].filter(Boolean))
+);
+const RATE_MODEL_CANDIDATES = Array.from(
+  new Set([RATE_PRIMARY_MODEL, RATE_FALLBACK_MODEL, "gemini-2.5-flash"].filter(Boolean))
 );
 const SOW_HEADING_TERMS = [
   "bill of quantities",
@@ -291,6 +305,7 @@ async function generateStructuredContent<T>({
   systemInstruction,
   temperature,
   preferredModel,
+  modelCandidates,
   thinkingBudget = -1,
 }: {
   prompt: string;
@@ -298,11 +313,12 @@ async function generateStructuredContent<T>({
   systemInstruction?: string;
   temperature: number;
   preferredModel?: string;
+  modelCandidates?: string[];
   /** Gemini thinking token budget. -1 = dynamic (default). 0 = disabled. */
   thinkingBudget?: number;
 }): Promise<T> {
   const candidates = Array.from(
-    new Set([preferredModel, ...MODEL_CANDIDATES].filter(Boolean))
+    new Set([preferredModel, ...(modelCandidates ?? DEFAULT_MODEL_CANDIDATES)].filter(Boolean))
   ) as string[];
 
   let lastError: unknown;
@@ -751,7 +767,8 @@ async function callModel<T>({
   temperature: number;
 }): Promise<T> {
   return generateStructuredContent<T>({
-    preferredModel: PRIMARY_MODEL,
+    preferredModel: SOW_PRIMARY_MODEL,
+    modelCandidates: SOW_MODEL_CANDIDATES,
     prompt,
     responseSchema,
     systemInstruction,
@@ -1043,7 +1060,8 @@ export async function validateSOW(
 
   try {
     const llm = await generateStructuredContent<SOWValidationResult>({
-      preferredModel: FALLBACK_MODEL,
+      preferredModel: SOW_FALLBACK_MODEL,
+      modelCandidates: SOW_MODEL_CANDIDATES,
       responseSchema: SOW_VALIDATION_SCHEMA,
       temperature: 0,
       prompt: `Analyse this document excerpt and classify whether it is suitable for construction BOQ generation.
@@ -1203,7 +1221,8 @@ export async function scoreBOQ(boq: import("./types").BOQDocument): Promise<{
         boq_semantics: number;
       };
     }>({
-      preferredModel: FALLBACK_MODEL,
+      preferredModel: SOW_FALLBACK_MODEL,
+      modelCandidates: SOW_MODEL_CANDIDATES,
       responseSchema: QA_SCHEMA,
       temperature: 0,
       prompt: `You are a senior quantity surveyor reviewing a generated Bill of Quantities for quality. Score this BOQ and identify any issues.\n\nBOQ summary:\n${summary}\n\nKnown deterministic assessment:\nScore ${deterministic.score}/10, grade ${deterministic.grade}, flags: ${deterministic.flags.join("; ") || "none"}.\n\nFull BOQ (JSON):\n${JSON.stringify(boq, null, 2).slice(0, 16000)}`,
@@ -1438,7 +1457,8 @@ type BOQValidationResult = {
 export async function validateBOQ(csvText: string): Promise<BOQValidationResult> {
   const preview = csvText.slice(0, 8000);
   return generateStructuredContent<BOQValidationResult>({
-    preferredModel: FALLBACK_MODEL,
+    preferredModel: RATE_FALLBACK_MODEL,
+    modelCandidates: RATE_MODEL_CANDIDATES,
     responseSchema: BOQ_VALIDATION_SCHEMA,
     temperature: 0,
     prompt: `Analyse the following spreadsheet data (CSV/table format) and determine whether it is a genuine Bill of Quantities (BOQ).
@@ -1649,7 +1669,8 @@ async function fillRatesPass(
         confidence?: number | null;
       }>
     }>({
-      preferredModel: FALLBACK_MODEL,
+      preferredModel: RATE_PRIMARY_MODEL,
+      modelCandidates: RATE_MODEL_CANDIDATES,
       responseSchema: RATES_SCHEMA,
       temperature: 0.1,
       systemInstruction: `You are a quantity surveyor estimating rates for a Zambian construction BOQ.\n\n${RATES_INSTRUCTION}${contextBlock}
