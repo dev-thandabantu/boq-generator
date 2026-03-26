@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
-import { validateBOQ } from "@/lib/claude";
-import { excelToCSV } from "@/lib/excel";
+import { extractWorkbookBOQ } from "@/lib/excel";
 import { randomUUID } from "crypto";
 import { logger } from "@/lib/logger";
 import { trackEvent } from "@/lib/analytics";
@@ -48,10 +47,10 @@ export async function POST(req: NextRequest) {
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
-    // Convert to CSV for Gemini analysis
-    let csvText: string;
+    // Deterministic workbook inspection for existing BOQ uploads
+    let workbookBoq;
     try {
-      csvText = excelToCSV(buffer);
+      workbookBoq = extractWorkbookBOQ(buffer);
     } catch {
       return NextResponse.json(
         { error: "Could not read the Excel file. Please check it is not password-protected or corrupted." },
@@ -59,25 +58,21 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (csvText.trim().length < 30) {
-      return NextResponse.json(
-        { error: "The spreadsheet appears to be empty or has no readable content." },
-        { status: 400 }
-      );
-    }
+    const measurableItems = workbookBoq.bills.flatMap((bill) =>
+      bill.items.filter((item) => !item.is_header && (item.unit || item.qty !== null))
+    );
 
-    // Full Gemini validation — detect if this is a genuine BOQ
-    const validation = await validateBOQ(csvText);
-
-    if (!validation.isValid) {
+    if (measurableItems.length === 0) {
       return NextResponse.json(
         {
-          error: validation.errorMessage ||
-            "This spreadsheet does not appear to be a Bill of Quantities. Please upload a BOQ with item descriptions, units, and quantities.",
+          error:
+            "This spreadsheet does not appear to contain measurable BOQ items. Please upload a BOQ with descriptions, units, and quantities.",
         },
         { status: 400 }
       );
     }
+    const missingRateCount = measurableItems.filter((item) => item.rate === null).length;
+    const workbookPreservation = workbookBoq.workbook_preservation;
 
     // Upload original Excel to Supabase Storage using service role client (no RLS on bucket)
     const serviceClient = createServiceClient();
@@ -108,16 +103,16 @@ export async function POST(req: NextRequest) {
     }
 
     trackEvent(user.id, "excel_ingested", {
-      totalItems: validation.totalItems,
-      missingRateCount: validation.missingRateCount,
+      totalItems: measurableItems.length,
+      missingRateCount,
     });
     return NextResponse.json({
       storageKey,
       preview: {
-        totalItems: validation.totalItems,
-        missingRateCount: validation.missingRateCount,
-        rateColumnHeader: validation.rateColumnHeader,
-        amountColumnHeader: validation.amountColumnHeader,
+        totalItems: measurableItems.length,
+        missingRateCount,
+        rateColumnHeader: workbookPreservation?.rate_column_header ?? null,
+        amountColumnHeader: workbookPreservation?.amount_column_header ?? null,
       },
     });
   } catch (err) {

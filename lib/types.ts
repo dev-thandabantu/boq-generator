@@ -14,6 +14,14 @@ export type BOQEvidenceType =
   | "metadata_only"
   | "missing";
 
+export type BOQRateSourceCategory =
+  | "embedded_market_heuristic"
+  | "workbook_local_pattern"
+  | "project_consistency_inference"
+  | "external_reference_document"
+  | "manual_override"
+  | "existing_workbook_rate";
+
 export type RequiredAttachmentType = "boq" | "drawing" | "spec" | "schedule" | "unknown";
 export type SourceBundleStatus =
   | "complete"
@@ -51,6 +59,17 @@ export interface BOQItem {
   derivation_note?: string | null;
   is_header?: boolean;
   note?: string; // "Incl", "Rate only", etc.
+  rate_source?: BOQRateSourceCategory;
+  rate_source_detail?: string | null;
+  rate_confidence?: number | null;
+  workbook_row_kind?:
+    | "measured_item"
+    | "header"
+    | "summary_row"
+    | "note_row"
+    | "preamble"
+    | "bill_header";
+  workbook_context?: string | null;
 }
 
 export interface BOQBill {
@@ -102,6 +121,7 @@ export interface BOQDocument {
   artifacts?: BOQArtifacts;
   qa?: BOQQualityScore;
   rate_reference?: BOQRateReference;
+  workbook_preservation?: BOQWorkbookPreservation;
 }
 
 export interface BOQRateReferenceAssessment {
@@ -145,7 +165,33 @@ export interface BOQComparisonReport {
   mean_absolute_percentage_error: number | null;
   mean_rate_delta: number | null;
   median_rate_delta: number | null;
+  section_match_ratio: number;
+  item_match_ratio: number;
+  workbook_fidelity_score: number;
+  pricing_accuracy_score: number;
+  overall_score: number;
+  missing_sections: string[];
+  extra_sections: string[];
+  missing_item_labels: string[];
+  extra_item_labels: string[];
   sample_matches: BOQComparisonMatchedItem[];
+}
+
+export interface BOQWorkbookPreservation {
+  sheet_name: string;
+  source_row_count: number;
+  source_col_count: number;
+  mapped_item_rows: number;
+  repeated_header_count: number;
+  preserved_summary_rows: number;
+  ambiguous_item_rows?: number;
+  workbook_local_rate_matches?: number;
+  ai_priced_rows?: number;
+  unresolved_rate_rows?: number;
+  outlier_rate_rows?: number;
+  rate_column_header?: string | null;
+  amount_column_header?: string | null;
+  qty_column_header?: string | null;
 }
 
 export interface BOQValidationFlag {
@@ -166,6 +212,11 @@ export interface BOQQualitySummary {
   qty_with_evidence: number;
   qty_missing: number;
   low_confidence: number;
+  rate_filled?: number;
+  rate_missing?: number;
+  mapped_rows?: number;
+  ambiguous_rows?: number;
+  outlier_rows?: number;
   semantic_risk_items?: number;
   evidence_coverage_ratio?: number;
   source_bundle_status?: SourceBundleStatus;

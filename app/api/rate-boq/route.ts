@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { getStripe } from "@/lib/stripe";
-import { fillBOQRates, RateContext } from "@/lib/claude";
-import { excelToCSV } from "@/lib/excel";
+import { fillMissingRatesInExistingBOQ, RateContext } from "@/lib/claude";
+import { extractWorkbookBOQ } from "@/lib/excel";
 import { logger } from "@/lib/logger";
 import { trackEvent } from "@/lib/analytics";
 import type { PostgrestError } from "@supabase/supabase-js";
@@ -24,10 +24,16 @@ function classifyError(message: string): { status: number; safeMessage: string }
     return { status: 429, safeMessage: "AI rate limit reached. Please wait a minute and try again." };
   }
   if (
+    lower.includes("fetch failed") ||
+    lower.includes("502") || lower.includes("bad gateway") ||
     lower.includes("503") || lower.includes("service unavailable") ||
-    lower.includes("timeout") || lower.includes("etimedout") || lower.includes("econnreset")
+    lower.includes("timeout") || lower.includes("etimedout") || lower.includes("econnreset") ||
+    lower.includes("econnrefused") || lower.includes("enotfound") || lower.includes("network")
   ) {
-    return { status: 503, safeMessage: "AI service is temporarily busy. Please try again in a moment." };
+    return {
+      status: 503,
+      safeMessage: "AI service is temporarily unavailable or the Gemini request could not be reached. Please try again in a moment.",
+    };
   }
   return { status: 500, safeMessage: "Rate filling failed. Please try again." };
 }
@@ -95,13 +101,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Convert to CSV and fill rates via Gemini
+    // Parse the original workbook deterministically, then fill only missing rates.
     const arrayBuffer = await fileData.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
-    const csvText = excelToCSV(buffer);
-
-    const truncated = csvText.length > 60000 ? csvText.slice(0, 60000) + "\n...[truncated]" : csvText;
-    const boq = await fillBOQRates(truncated, rate_context);
+    const workbookBoq = extractWorkbookBOQ(buffer, {
+      rateColumnHeader: rateColHeader || null,
+      amountColumnHeader: amountColHeader || null,
+    });
+    const boq = await fillMissingRatesInExistingBOQ(workbookBoq, rate_context);
 
     const title = boq.project || "Rated BOQ";
 
