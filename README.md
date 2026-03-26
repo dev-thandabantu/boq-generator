@@ -1,19 +1,18 @@
 # BOQ Generator
 
-AI-powered Bill of Quantities generator for construction projects in Southern Africa (Zambian context). Upload a Scope of Work PDF or rate an existing BOQ Excel — pay once and receive a fully structured, editable BOQ you can export to Excel.
+AI-powered Bill of Quantities generator for construction projects in Southern Africa (Zambian context). Upload a Scope of Work PDF or rate an existing BOQ Excel, pay once, and receive a structured BOQ you can edit and export.
 
 ## Features
 
-- **PDF/DOCX upload & extraction** — drag-and-drop a Scope of Work document
-- **AI-generated BOQ** — Gemini 2.5 Pro extracts line items, quantities, units, and groups them into standard trade bills
-- **Rate an existing BOQ** — upload an unrated Excel BOQ; AI fills in Zambian market rates calibrated to province, site accessibility, labour source, and margin
-- **Stripe payment gate** — $100 per generation or rating; no account needed to pay
-- **Google OAuth auth** — sign in to save and revisit past BOQs
-- **BOQ editor** — edit rates in-browser; amounts auto-calculate; changes auto-save
-- **AI edit assistant** — natural-language instructions to add/remove/edit BOQ items via streaming assistant
-- **Excel export** — download a formatted `.xlsx` in Zambian tender format, or patch your original Excel file with rates added in-place
-- **Dashboard** — view and reopen all previously generated BOQs
-- **Health check** — `GET /api/health` returns DB connectivity status (for uptime monitors)
+- PDF and DOCX upload and extraction
+- AI-generated BOQ creation
+- AI rate filling for existing Excel BOQs
+- Stripe checkout
+- Google OAuth auth with Supabase
+- Browser-based BOQ editor
+- Excel export and patched-original export
+- Dashboard for saved BOQs
+- Health check endpoint
 
 ## Tech Stack
 
@@ -21,34 +20,18 @@ AI-powered Bill of Quantities generator for construction projects in Southern Af
 |---|---|
 | Framework | Next.js 15 (App Router) |
 | Language | TypeScript |
-| Auth + DB | Supabase (Postgres + Row Level Security) |
-| AI | Google Gemini 2.5 Pro (primary) / 2.5 Flash (fallback) |
+| Auth + DB | Supabase |
+| AI | Google Gemini 2.5 Pro / 2.5 Flash |
 | Payments | Stripe Checkout |
 | Deployment | Vercel |
 | Styling | Tailwind CSS |
-| Excel | xlsx (SheetJS) |
-| Error tracking | Sentry (`@sentry/nextjs`) |
-| Analytics | PostHog (client + server-side events) |
-| Rate limiting | Upstash Redis (`@upstash/ratelimit`) |
-
-## User Flows
-
-```
-── Generate from SoW ──────────────────────────────────────────────────────────
-Upload PDF/DOCX → Extract text → Pay $100 (Stripe) → /generating (AI) → BOQ Editor → Export Excel
-                                                                              ↓
-                                                                       Saved to Supabase
-
-── Rate an existing BOQ ───────────────────────────────────────────────────────
-Upload Excel BOQ → Validate structure → Answer 5 context questions → Pay $100 (Stripe)
-  → /generating (AI fills rates) → BOQ Editor → Export patched Excel or formatted BOQ
-```
-
----
+| Analytics | PostHog |
+| Error tracking | Sentry |
+| Rate limiting | Upstash Redis |
 
 ## Setup
 
-### 1. Clone & install
+### 1. Clone and install
 
 ```bash
 git clone <repo-url>
@@ -58,23 +41,35 @@ npm install
 
 ### 2. Environment variables
 
-Copy `.env.local.example` to `.env.local` and fill in every value:
+Copy `.env.local.example` to `.env.local` and fill in every value.
+
+This repo is set up for three scopes:
+
+- Development and Vercel Preview share the same non-production credentials.
+- Production uses its own Supabase project, Stripe keys, bucket, and app URL.
+- Shared service keys can stay the same across all environments if you want the simplest setup.
+
+Core variables used by the app:
 
 ```bash
 # Supabase
 NEXT_PUBLIC_SUPABASE_URL=https://<project>.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon-key>
 SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
-
-# Direct Postgres connection (for migrations)
 DATABASE_URL=postgresql://postgres:<password>@db.<project>.supabase.co:5432/postgres
+DATABASE_DIRECT_URL=postgresql://postgres:<password>@db.<project>.supabase.co:5432/postgres
+DATABASE_POOLER_URL=postgresql://postgres.<project>:<password>@<pooler-host>:5432/postgres
+SUPABASE_STORAGE_BUCKET=boq-generator-dev
 
 # Stripe
-STRIPE_SECRET_KEY=sk_live_...          # or sk_test_... for local dev
-STRIPE_WEBHOOK_SECRET=whsec_...        # from Stripe dashboard → Webhooks
+STRIPE_SECRET_KEY=sk_live_...          # or sk_test_... for local dev / preview
+STRIPE_WEBHOOK_SECRET=whsec_...        # from Stripe dashboard -> Webhooks
 
 # Gemini
 GEMINI_API_KEY=<your-google-ai-key>
+
+# Resend
+RESEND_API_KEY=<your-resend-key>
 
 # App URL (no trailing slash)
 NEXT_PUBLIC_APP_URL=https://your-app.vercel.app   # or http://localhost:3000 locally
@@ -83,25 +78,56 @@ NEXT_PUBLIC_APP_URL=https://your-app.vercel.app   # or http://localhost:3000 loc
 NEXT_PUBLIC_POSTHOG_KEY=phc_...
 NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com
 
-# Sentry error tracking
+# Sentry
 SENTRY_DSN=https://...@....ingest.sentry.io/...
 NEXT_PUBLIC_SENTRY_DSN=<same value as SENTRY_DSN>
 
-# Upstash Redis (rate limiting — optional in local dev, required in production)
+# Upstash Redis (optional in local dev)
 UPSTASH_REDIS_REST_URL=https://<name>.upstash.io
 UPSTASH_REDIS_REST_TOKEN=<token>
 ```
 
-> **Local dev:** Upstash vars are optional — rate limiting gracefully skips when they are absent. Sentry and PostHog server events are suppressed when `NODE_ENV !== "production"`.
+Local dev note: Upstash vars are optional. Rate limiting skips when they are absent. Sentry and PostHog server events are suppressed when `NODE_ENV !== "production"`.
+
+### 2.1 Vercel environment matrix
+
+Set the following in `Vercel -> Settings -> Environment Variables`:
+
+| Variable | Development | Preview | Production |
+|---|---|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | preview/dev value | preview/dev value | production value |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | preview/dev value | preview/dev value | production value |
+| `SUPABASE_SERVICE_ROLE_KEY` | preview/dev value | preview/dev value | production value |
+| `DATABASE_URL` | preview/dev value | preview/dev value | production value |
+| `DATABASE_DIRECT_URL` | preview/dev value | preview/dev value | production value |
+| `DATABASE_POOLER_URL` | preview/dev value | preview/dev value | production value |
+| `SUPABASE_STORAGE_BUCKET` | shared preview/dev bucket | shared preview/dev bucket | production bucket |
+| `STRIPE_SECRET_KEY` | test key | test key | live key |
+| `STRIPE_WEBHOOK_SECRET` | local Stripe CLI secret | preview Stripe test secret | production Stripe webhook secret |
+| `NEXT_PUBLIC_APP_URL` | `http://localhost:3000` | preview deployment URL | production domain |
+| `GEMINI_API_KEY` | shared value | shared value | shared value or production-only |
+| `RESEND_API_KEY` | shared value | shared value | shared value or production-only |
+| `NEXT_PUBLIC_POSTHOG_KEY` | shared value | shared value | shared value or production-only |
+| `NEXT_PUBLIC_POSTHOG_HOST` | shared value | shared value | shared value |
+| `SENTRY_DSN` | shared value | shared value | shared value or production-only |
+| `NEXT_PUBLIC_SENTRY_DSN` | shared value | shared value | shared value or production-only |
+| `UPSTASH_REDIS_REST_URL` | shared value | shared value | shared value or production-only |
+| `UPSTASH_REDIS_REST_TOKEN` | shared value | shared value | shared value or production-only |
+
+Recommended grouping:
+
+- Shared by Development and Preview: all preview Supabase vars, `SUPABASE_STORAGE_BUCKET`, Stripe test vars, and non-production app URLs
+- Production only: all production Supabase vars, production bucket name, Stripe live vars, and production app URL
+- Safe to share everywhere for now: Gemini, Resend, PostHog, Sentry, and Upstash
 
 ### 3. Database migrations
 
-Migrations live in `supabase/migrations/` and run automatically:
+Migrations live in `supabase/migrations/`.
 
-- **Production** — a GitHub Actions workflow (`.github/workflows/migrate.yml`) runs all `*.sql` files in sorted order on every push to `master`.
-- **Local dev** — migrations run at Next.js cold-start via `instrumentation.ts` → `lib/db/migrate.ts`.
+- Production: GitHub Actions can run them on deploy
+- Local dev: they can run at cold start via `instrumentation.ts` -> `lib/db/migrate.ts`
 
-If you need to run them manually:
+Manual example:
 
 ```bash
 psql "$DATABASE_URL" -f supabase/migrations/001_initial.sql
@@ -111,17 +137,13 @@ psql "$DATABASE_URL" -f supabase/migrations/003_indexes.sql
 
 ### 4. Configure Supabase Auth
 
-In your Supabase project → **Authentication → Providers**:
+In your Supabase project:
 
-- Enable **Google**
-- Add your Google OAuth Client ID and Secret (from [Google Cloud Console](https://console.cloud.google.com/))
-- Add your app's callback URL as an **Authorized redirect URI** in Google:
-  ```
-  https://<your-app>.vercel.app/auth/callback
-  ```
-- In Supabase → **Authentication → URL Configuration**, set:
-  - **Site URL**: `https://<your-app>.vercel.app`
-  - **Redirect URLs**: `https://<your-app>.vercel.app/auth/callback`
+- Enable Google auth
+- Add your Google OAuth client ID and secret
+- Add `https://<your-app>.vercel.app/auth/callback` as an authorized redirect URI
+- Set Site URL to your app URL
+- Add the callback URL to Redirect URLs
 
 ### 5. Local development
 
@@ -129,106 +151,68 @@ In your Supabase project → **Authentication → Providers**:
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open `http://localhost:3000`.
 
-For local Stripe testing, install the [Stripe CLI](https://stripe.com/docs/stripe-cli) and forward webhooks:
+For local Stripe testing:
 
 ```bash
 stripe listen --forward-to localhost:3000/api/webhooks/stripe
 ```
 
-The CLI will print a `whsec_...` secret — use that as `STRIPE_WEBHOOK_SECRET` in `.env.local`.
-
----
+Use the printed `whsec_...` value as `STRIPE_WEBHOOK_SECRET` in `.env.local`.
 
 ## Deploying to Vercel
 
-1. Push to GitHub and import the repo in [Vercel](https://vercel.com/new)
-2. Add all environment variables to Vercel → **Settings → Environment Variables**
-3. Set `NEXT_PUBLIC_APP_URL` to your actual Vercel URL
-4. Deploy — migrations run automatically on first cold-start
+1. Push to GitHub and import the repo in Vercel.
+2. Add all environment variables in `Settings -> Environment Variables`.
+3. Set `NEXT_PUBLIC_APP_URL` to the correct URL for each environment.
+4. Deploy.
 
-### Stripe webhook (production)
+### Stripe webhook
 
-1. Stripe Dashboard → **Developers → Webhooks → Add endpoint**
-2. URL: `https://<your-app>.vercel.app/api/webhooks/stripe`
-3. Events to listen for: `checkout.session.completed`
-4. Copy the signing secret (`whsec_...`) into Vercel env as `STRIPE_WEBHOOK_SECRET`
+1. In Stripe, add a webhook endpoint.
+2. Use `https://<your-app>.vercel.app/api/webhooks/stripe`.
+3. Subscribe to `checkout.session.completed`.
+4. Copy the signing secret into `STRIPE_WEBHOOK_SECRET`.
 
 ### Storage bucket
 
-The app uses a Supabase Storage bucket named `boq-generator-dev` to store uploaded Excel files before rate filling. Create it in Supabase → **Storage** with private access (RLS handled by the service role key).
+The app uses `SUPABASE_STORAGE_BUCKET` for uploaded Excel files.
 
----
+Recommended names:
+
+- Development + Preview: `boq-generator-dev`
+- Production: `boq-generator-prod`
+
+Create the bucket in Supabase Storage with private access.
 
 ## Project structure
 
-```
+```text
 app/
-  page.tsx                  # Landing page
-  upload/page.tsx           # Upload / pricing page (Generate + Rate tabs)
-  login/page.tsx            # Google sign-in
-  generating/page.tsx       # Progress screen while AI runs
-  boq/[id]/page.tsx         # BOQ editor (loads from DB)
-  dashboard/page.tsx        # List of past BOQs
-  error.tsx                 # App-level error boundary (reports to Sentry)
-  not-found.tsx             # Styled 404 page
-  global-error.tsx          # Root HTML error boundary
-  auth/callback/            # Supabase OAuth callback handler
+  upload/page.tsx
+  dashboard/page.tsx
+  login/page.tsx
   api/
-    extract/                # PDF/DOCX → text extraction + SOW detection
-    checkout/               # Create Stripe Checkout session
-    generate/               # Gemini BOQ generation + save to DB
-    rate-boq/               # Gemini rate filling for uploaded Excel BOQs
-    ingest-boq/             # Validate + upload Excel BOQ to Storage
-    boqs/                   # GET list, GET by id, PUT (auto-save)
-    boqs/[id]/assistant/    # AI edit assistant (streaming + preview modes)
-    export/                 # Excel export (formatted or patched original)
-    health/                 # GET /api/health — DB connectivity check
-    webhooks/stripe/        # Stripe payment confirmation
+  auth/callback/
 
 lib/
-  claude.ts                 # Gemini API wrapper (generateBOQ, fillBOQRates)
-  boq-assistant.ts          # Gemini wrapper for BOQ edit instructions
-  excel.ts                  # Excel parsing, CSV conversion, patchExcelWithRates
-  logger.ts                 # Zero-dependency structured JSON logger
-  analytics.ts              # PostHog server-side event tracking (production only)
-  config.ts                 # Startup env var validation
-  db/                       # Supabase client helpers + migrate.ts
-  stripe.ts                 # Lazy Stripe client
-  types.ts                  # Shared TypeScript types
+  config.ts
+  supabase/
+  stripe.ts
+  analytics.ts
+  db/
 
 supabase/
   migrations/
-    001_initial.sql         # Schema: profiles, boqs, payments + RLS
-    002_excel_rate_ingestion.sql  # source_excel_key, rate/amount col headers
-    003_indexes.sql         # Performance indexes
-
-proxy.ts                    # Next.js middleware: auth guard + IP rate limiting
-instrumentation.ts          # Server init: Sentry + DB migrations
-instrumentation-client.ts   # Browser Sentry init + Session Replay
-sentry.server.config.ts     # Node runtime Sentry config
-sentry.edge.config.ts       # Edge runtime Sentry config
 ```
-
-## Observability
-
-| Tool | What it covers |
-|---|---|
-| **Sentry** | Unhandled server errors, React error boundaries, edge errors, Session Replay |
-| **PostHog** | `boq_generated`, `boq_rated`, `excel_ingested`, `payment_completed` server events + client-side page views |
-| **Structured logs** | All API routes emit JSON logs (`lib/logger.ts`) — visible in Vercel log drain |
-| **Health check** | `GET /api/health` — returns `{ status, timestamp, db }` for uptime monitors |
-| **Rate limiting** | Upstash Redis sliding window: 10 requests / 15 min per IP on AI routes |
 
 ## Common issues
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Tables don't exist | Migration hasn't run | Check GitHub Actions → migrate job, or run SQL files manually |
-| Auth redirect loop | Supabase redirect URLs not configured | Add `/auth/callback` to Supabase Auth settings |
-| Stripe checkout fails | `STRIPE_SECRET_KEY` is missing | Add real key in Vercel env vars |
-| BOQ generation fails | `GEMINI_API_KEY` missing or invalid | Add real Gemini API key in Vercel env vars |
-| Rate filling misaligns | Excel BOQ has unusual structure | Check that the rate column header is detected correctly in the `/api/ingest-boq` response |
-| 429 on AI routes | Upstash rate limit hit | Wait 15 minutes, or increase limit in `proxy.ts` |
-| Sentry not receiving | DSN not set in Vercel | Add `SENTRY_DSN` + `NEXT_PUBLIC_SENTRY_DSN` to Vercel env vars |
+| Tables do not exist | Migrations have not run | Run the SQL files or check the migration workflow |
+| Auth redirect loop | Supabase redirect URLs are wrong | Add `/auth/callback` in Supabase Auth settings |
+| Stripe checkout fails | `STRIPE_SECRET_KEY` is missing | Add the correct key in Vercel |
+| BOQ generation fails | `GEMINI_API_KEY` is missing or invalid | Add a valid Gemini key |
+| Sentry not receiving events | DSN is missing | Add `SENTRY_DSN` and `NEXT_PUBLIC_SENTRY_DSN` |

@@ -50,7 +50,7 @@ export async function GET(req: NextRequest) {
       .filter((r) => r.status === "paid")
       .reduce((sum, r) => sum + (r.commission_cents ?? 0), 0);
 
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL ?? req.headers.get("origin") ?? "";
+    const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? req.headers.get("origin") ?? "";
 
     return NextResponse.json({
       affiliate: {

@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
       .maybeSingle();
 
     if (existing) {
-      const baseUrl = process.env.NEXT_PUBLIC_BASE_URL ?? req.headers.get("origin") ?? "";
+      const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? req.headers.get("origin") ?? "";
       return NextResponse.json({
         affiliate: existing,
         referral_url: `${baseUrl}/?ref=${existing.referral_code}`,
@@ -83,7 +83,7 @@ export async function POST(req: NextRequest) {
 
     trackEvent(user.id, "affiliate_signup", { referralCode, payoutEmail });
 
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL ?? req.headers.get("origin") ?? "";
+    const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? req.headers.get("origin") ?? "";
     return NextResponse.json({
       affiliate,
       referral_url: `${baseUrl}/?ref=${referralCode}`,
