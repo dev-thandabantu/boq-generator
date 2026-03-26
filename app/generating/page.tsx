@@ -17,6 +17,17 @@ function GeneratingContent() {
   );
   const started = useRef(false);
 
+  async function recoverCompletedBoq(currentSessionId: string): Promise<string | null> {
+    try {
+      const res = await fetch(`/api/boqs/by-session?session_id=${encodeURIComponent(currentSessionId)}`);
+      if (!res.ok) return null;
+      const body = (await res.json()) as { boq_id?: string | null };
+      return body.boq_id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   useEffect(() => {
     if (started.current) return;
     started.current = true;
@@ -149,10 +160,15 @@ function GeneratingContent() {
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Something went wrong";
+        const recoveredBoqId = sessionId ? await recoverCompletedBoq(sessionId) : null;
+        if (recoveredBoqId) {
+          router.push(`/boq/${recoveredBoqId}`);
+          return;
+        }
         setStatusText("Generation stopped due to an error.");
         setError(
           msg === "Failed to fetch"
-            ? "Network error. Check your connection and try again."
+            ? "The connection dropped while the BOQ was generating. We checked for a completed result but did not find one yet. Please try again."
             : msg
         );
       } finally {

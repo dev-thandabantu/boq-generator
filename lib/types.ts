@@ -22,6 +22,25 @@ export type BOQRateSourceCategory =
   | "manual_override"
   | "existing_workbook_rate";
 
+export type BOQPricingCategory =
+  | "ditto_reference"
+  | "pipe_run"
+  | "pipe_fitting"
+  | "steel_fabrication"
+  | "concrete_structure"
+  | "earthworks"
+  | "finishes"
+  | "doors_windows"
+  | "electrical_fixture"
+  | "treatment_service"
+  | "other";
+
+export type BOQRateSkipReason =
+  | "specialist_item_requires_local_precedent"
+  | "ditto_without_parent"
+  | "ai_outlier_rejected"
+  | "no_safe_rate_reference";
+
 export type RequiredAttachmentType = "boq" | "drawing" | "spec" | "schedule" | "unknown";
 export type SourceBundleStatus =
   | "complete"
@@ -62,6 +81,8 @@ export interface BOQItem {
   rate_source?: BOQRateSourceCategory;
   rate_source_detail?: string | null;
   rate_confidence?: number | null;
+  pricing_category?: BOQPricingCategory;
+  rate_skip_reason?: BOQRateSkipReason | null;
   workbook_row_kind?:
     | "measured_item"
     | "header"

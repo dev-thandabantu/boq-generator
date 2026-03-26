@@ -5,6 +5,8 @@ import type {
   BOQDocumentType,
   BOQEvidenceType,
   BOQDocument,
+  BOQPricingCategory,
+  BOQRateSkipReason,
   DocumentClassification,
   BOQItem,
   BOQQuantityArtifactItem,
@@ -1524,6 +1526,49 @@ function buildExistingRateReferences(
   return (preferred.length > 0 ? preferred : existingRates).slice(0, 60);
 }
 
+function classifyPricingCategory(description: string, unit: string): BOQPricingCategory {
+  const text = `${normalizeRateKey(description, unit)} ${normalizeRateKey(unit, "")}`.trim();
+  if (/\bditto\b|\bincluding\b|\bincl\b/.test(text)) return "ditto_reference";
+  if (/\bant proof\b|\bantproof\b|\btermite\b|\binsecticide\b|\btreatment\b|\bdestroy termites\b/.test(text)) {
+    return "treatment_service";
+  }
+  if (/\bmantis\b|\bgrating\b|\bbaluster\b|\brsa\b|\btread support\b|\bbracing\b|\bhandrail\b|\bsteel\b|\bmetal\b/.test(text)) {
+    return "steel_fabrication";
+  }
+  if (/\bpipe\b|\bupvc\b|\bpvc\b|\bdrain\b|\bgully\b|\btrap\b|\belbow\b|\btee\b|\bbranch\b|\bjunction\b|\bsleeve\b|\bconnector\b|\bbend\b/.test(text)) {
+    if (/\belbow\b|\btee\b|\bbranch\b|\bjunction\b|\bsleeve\b|\bconnector\b|\bbend\b|\btrap\b|\bgully\b/.test(text)) {
+      return "pipe_fitting";
+    }
+    return "pipe_run";
+  }
+  if (/\bdoor\b|\bframe\b|\blouvre\b|\bironmongery\b|\bwindow\b/.test(text)) return "doors_windows";
+  if (/\bceiling mounted\b|\blight point\b|\blight fitting\b|\bswitch\b|\bsocket\b|\boutlet\b|\bphotocell\b|\belectrical\b/.test(text)) {
+    return "electrical_fixture";
+  }
+  if (/\bpaint\b|\bplaster\b|\brender\b|\bscreed\b|\btiling\b|\bfloor finish\b/.test(text)) return "finishes";
+  if (/\bconcrete\b|\breinforcement\b|\bformwork\b|\bfoundation\b|\bbases\b|\bcolumns\b|\bsurface bed\b|\bmesh\b/.test(text)) {
+    return "concrete_structure";
+  }
+  if (/\bexcavat\b|\bbackfill\b|\btrench\b|\bhardcore\b|\bcompacting\b|\blevelling\b|\brock\b/.test(text)) {
+    return "earthworks";
+  }
+  return "other";
+}
+
+function requiresLocalPrecedent(category: BOQPricingCategory): boolean {
+  return (
+    category === "ditto_reference" ||
+    category === "pipe_fitting" ||
+    category === "steel_fabrication" ||
+    category === "treatment_service"
+  );
+}
+
+function defaultSkipReason(category: BOQPricingCategory): BOQRateSkipReason {
+  if (category === "ditto_reference") return "ditto_without_parent";
+  return "specialist_item_requires_local_precedent";
+}
+
 function summarizeRateQuality(
   boq: BOQDocument,
   metrics: {
@@ -1593,6 +1638,7 @@ async function fillRatesPass(
   }
 
   let localMatches = 0;
+  let gatedSpecialistRows = 0;
   const unresolvedItems: Array<{
     item_key: string;
     description: string;
@@ -1608,9 +1654,22 @@ async function fillRatesPass(
       ...bill,
       items: bill.items.map((item) => {
         if (item.is_header || item.rate !== null) return item;
+        const pricingCategory = classifyPricingCategory(item.description, item.unit);
         const key = normalizeRateKey(item.description, item.unit);
         const exactMatches = exactRateMap.get(key) ?? [];
         const matchedRate = median(exactMatches);
+        if (matchedRate === null && requiresLocalPrecedent(pricingCategory)) {
+          gatedSpecialistRows += 1;
+          return {
+            ...item,
+            pricing_category: pricingCategory,
+            rate_skip_reason: defaultSkipReason(pricingCategory) as BOQRateSkipReason,
+            rate_source_detail:
+              pricingCategory === "ditto_reference"
+                ? "Skipped auto-pricing because this ditto/reference row has no safe local parent rate."
+                : "Skipped auto-pricing because this specialist item needs workbook-local precedent.",
+          };
+        }
         if (matchedRate === null) {
           unresolvedItems.push({
             item_key: item.item_key ?? `${item.item_no || item.description.slice(0, 20)}`,
@@ -1626,11 +1685,13 @@ async function fillRatesPass(
         localMatches += 1;
         return {
           ...item,
+          pricing_category: pricingCategory,
           rate: matchedRate,
           amount: item.qty !== null ? +(item.qty * matchedRate).toFixed(2) : null,
           rate_source: "workbook_local_pattern",
           rate_source_detail: "Reused an exact matching rate from another row in the uploaded workbook.",
           rate_confidence: 0.95,
+          rate_skip_reason: null,
         };
       }),
     })),
@@ -1644,7 +1705,9 @@ async function fillRatesPass(
             ...locallyFilledBoq.workbook_preservation,
             workbook_local_rate_matches:
               (locallyFilledBoq.workbook_preservation.workbook_local_rate_matches ?? 0) + localMatches,
-            unresolved_rate_rows: 0,
+            unresolved_rate_rows: locallyFilledBoq.bills
+              .flatMap((bill) => bill.items)
+              .filter((item) => !item.is_header && item.rate === null).length,
           }
         : undefined,
     };
@@ -1712,6 +1775,7 @@ ${JSON.stringify(batch)}`,
       ...bill,
       items: bill.items.map((item) => {
         if (item.is_header || item.rate !== null) return item;
+        const pricingCategory = classifyPricingCategory(item.description, item.unit);
         const itemKey = item.item_key ?? `${item.item_no || item.description.slice(0, 20)}`;
         const rateData = rateMap.get(itemKey);
         if (!rateData) return item;
@@ -1723,6 +1787,8 @@ ${JSON.stringify(batch)}`,
           outlierMatches += 1;
           return {
             ...item,
+            pricing_category: pricingCategory,
+            rate_skip_reason: "ai_outlier_rejected" as BOQRateSkipReason,
             rate_source_detail:
               "Skipped AI rate because it looked like an outlier against other workbook rates with the same unit.",
           };
@@ -1733,11 +1799,13 @@ ${JSON.stringify(batch)}`,
         aiMatches += 1;
         return {
           ...item,
+          pricing_category: pricingCategory,
           rate,
           amount,
           rate_source: (rateData.source_category as BOQItem["rate_source"]) ?? "embedded_market_heuristic",
           rate_source_detail: rateData.rationale ?? null,
           rate_confidence: rateData.confidence ?? null,
+          rate_skip_reason: null,
         };
       }),
     })),
@@ -1755,6 +1823,7 @@ ${JSON.stringify(batch)}`,
           unresolved_rate_rows: filled.bills
             .flatMap((bill) => bill.items)
             .filter((item) => !item.is_header && item.rate === null).length,
+          ambiguous_item_rows: (filled.workbook_preservation.ambiguous_item_rows ?? 0) + gatedSpecialistRows,
         }
       : undefined,
   };

@@ -18,6 +18,15 @@ function isMissingColumnError(error: PostgrestError | null, columns: string[]): 
   return columns.some((column) => haystack.includes(column.toLowerCase()));
 }
 
+function isDuplicateStripeSessionError(error: PostgrestError | null): boolean {
+  if (!error) return false;
+  const haystack = [error.message, error.details, error.hint, error.code].filter(Boolean).join(" ").toLowerCase();
+  return (
+    error.code === "23505" &&
+    (haystack.includes("stripe_session_id") || haystack.includes("boqs_stripe_session_id_key"))
+  );
+}
+
 function classifyError(message: string): { status: number; safeMessage: string } {
   const lower = message.toLowerCase();
   if (lower.includes("429") || lower.includes("quota") || lower.includes("too many requests")) {
@@ -149,6 +158,25 @@ export async function POST(req: NextRequest) {
     }
 
     if (dbError) {
+      if (isDuplicateStripeSessionError(dbError)) {
+        logger.warn("Duplicate rate-boq save detected; loading existing row", {
+          code: dbError.code,
+          message: dbError.message,
+          details: dbError.details,
+          route: "rate-boq",
+        });
+
+        const { data: concurrentBoq } = await serviceClient
+          .from("boqs")
+          .select("id, data")
+          .eq("stripe_session_id", session_id)
+          .maybeSingle();
+
+        if (concurrentBoq?.id) {
+          return NextResponse.json({ boq: concurrentBoq.data, boq_id: concurrentBoq.id });
+        }
+      }
+
       logger.error("Failed to save rated BOQ", {
         error: String(dbError),
         code: dbError.code,
