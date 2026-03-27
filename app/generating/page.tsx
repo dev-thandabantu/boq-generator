@@ -13,6 +13,7 @@ function GeneratingContent() {
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState(10);
   const [statusText, setStatusText] = useState("Verifying payment and preparing your BOQ...");
+  const [isRateBoq, setIsRateBoq] = useState(false);
   const started = useRef(false);
 
   async function recoverCompletedBoq(currentSessionId: string): Promise<string | null> {
@@ -47,7 +48,8 @@ function GeneratingContent() {
       }
 
       const boqType = localStorage.getItem("boq_type") ?? "generate";
-      const isRateBoq = boqType === "rate_boq";
+      const isRateBoqValue = boqType === "rate_boq";
+      setIsRateBoq(isRateBoqValue);
 
       let progressTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -60,7 +62,7 @@ function GeneratingContent() {
             setStatusText("Still working. Complex BOQs can take a bit longer...");
           } else if (elapsed > 8) {
             setStatusText(
-              isRateBoq
+              isRateBoqValue
                 ? "Matching Zambian market rates to your items..."
                 : "Finalising your BOQ..."
             );
@@ -71,7 +73,7 @@ function GeneratingContent() {
 
         let res: Response;
 
-        if (isRateBoq) {
+        if (isRateBoqValue) {
           setStatusText("AI is parsing your BOQ and filling in rates...");
           const rateContextRaw = localStorage.getItem("boq_rate_context");
           const rateContext = rateContextRaw ? JSON.parse(rateContextRaw) : undefined;
@@ -107,13 +109,13 @@ function GeneratingContent() {
             throw new Error("AI service is temporarily busy. Please wait a moment and try again.");
           if (res.status === 504 || !e)
             throw new Error("The request timed out. Please try again.");
-          throw new Error(e || (isRateBoq ? "Rate filling failed" : "Could not unlock BOQ"));
+          throw new Error(e || (isRateBoqValue ? "Rate filling failed" : "Could not unlock BOQ"));
         }
 
         const { boq, boq_id } = await res.json();
         setProgress(100);
 
-        ph.capture(isRateBoq ? "boq_rates_filled" : "boq_unlocked", {
+        ph.capture(isRateBoqValue ? "boq_rates_filled" : "boq_unlocked", {
           boq_id,
           bill_count: boq?.bills?.length ?? 0,
           item_count: (boq?.bills ?? []).reduce(
@@ -222,8 +224,43 @@ function GeneratingContent() {
               <h2 className="text-2xl font-bold text-white mb-2">Preparing your BOQ</h2>
               <p className="text-gray-400 text-sm">{statusText}</p>
             </div>
+            {/* Step tracker */}
+            {(() => {
+              const steps = [
+                { label: "Payment verified", done: progress >= 30, active: progress < 30 },
+                { label: isRateBoq ? "Filling in market rates" : "Building your BOQ", done: progress >= 80, active: progress >= 30 && progress < 80 },
+                { label: "Finalising", done: progress >= 100, active: progress >= 80 && progress < 100 },
+              ];
+              return (
+                <div className="flex items-center justify-center gap-3">
+                  {steps.map((step, i) => (
+                    <div key={i} className="flex items-center gap-3">
+                      <div className="flex items-center gap-1.5">
+                        {step.done ? (
+                          <span className="w-5 h-5 rounded-full bg-amber-400 flex items-center justify-center shrink-0">
+                            <svg className="w-3 h-3 text-black" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                            </svg>
+                          </span>
+                        ) : step.active ? (
+                          <span className="w-5 h-5 rounded-full border-2 border-amber-400 border-t-transparent animate-spin shrink-0" />
+                        ) : (
+                          <span className="w-5 h-5 rounded-full border border-white/20 bg-white/5 shrink-0" />
+                        )}
+                        <span className={`text-xs ${step.done ? "text-amber-300" : step.active ? "text-white" : "text-gray-600"}`}>
+                          {step.label}
+                        </span>
+                      </div>
+                      {i < steps.length - 1 && (
+                        <span className="w-6 h-px bg-white/15 shrink-0" />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
             <div className="space-y-2">
-              <Progress value={progress} className="h-1.5 bg-white/10" />
+              <Progress value={progress} className="h-2 bg-white/10" />
               <p className="text-xs text-gray-500">Almost there…</p>
             </div>
           </div>
