@@ -393,8 +393,33 @@ export default function BOQPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="w-6 h-6 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+      <div className="min-h-screen bg-[#0b0c0f] animate-pulse">
+        {/* Header skeleton */}
+        <div className="sticky top-0 z-20 border-b border-white/10 bg-[#0b0c0f]/95 px-4 py-3">
+          <div className="max-w-[1500px] mx-auto flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="h-7 w-28 rounded bg-white/10" />
+              <div className="h-5 w-16 rounded-full bg-white/10" />
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="h-8 w-24 rounded-lg bg-white/10" />
+              <div className="h-8 w-20 rounded-lg bg-white/10" />
+            </div>
+          </div>
+        </div>
+        {/* Table skeleton */}
+        <div className="max-w-[1500px] mx-auto px-4 py-6 space-y-3">
+          <div className="h-6 w-48 rounded bg-white/10" />
+          <div className="rounded-xl border border-white/10 overflow-hidden">
+            {[100, 60, 80, 45, 70, 55].map((w, i) => (
+              <div key={i} className="flex items-center gap-4 px-4 py-3 border-b border-white/5 last:border-0">
+                <div className="h-4 rounded bg-white/10" style={{ width: `${w}%` }} />
+                <div className="h-4 w-16 rounded bg-white/10 shrink-0" />
+                <div className="h-4 w-20 rounded bg-white/10 shrink-0" />
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
     );
   }
@@ -749,12 +774,6 @@ function AssistantPanel({
             Undo ({undoCount})
           </button>
         </div>
-        {assistantStatus && (
-          <div className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-amber-500/15 border border-amber-500/30 px-2.5 py-1 text-[11px] text-amber-200">
-            <span className="w-2.5 h-2.5 rounded-full border border-amber-300/60 border-t-transparent animate-spin shrink-0" />
-            {assistantStatus}
-          </div>
-        )}
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto p-3 flex flex-col gap-3">
@@ -763,7 +782,7 @@ function AssistantPanel({
             <p className="text-xs text-white leading-relaxed">
               Tell me what to change in this BOQ and I will generate a safe proposal first.
             </p>
-            <div className="grid gap-2">
+            <div className={`grid gap-2 transition-opacity ${assistantBusy ? "opacity-40 pointer-events-none" : ""}`}>
               {quickPrompts.map((prompt) => (
                 <button
                   key={prompt}
@@ -792,10 +811,19 @@ function AssistantPanel({
                     {message.role === "user" ? "You" : "Assistant"}
                   </span>
                   {message.role === "assistant" && !message.content ? (
-                    <span className="inline-flex gap-1 items-center h-4 mt-0.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-amber-300/70 animate-bounce" style={{ animationDelay: "0ms" }} />
-                      <span className="w-1.5 h-1.5 rounded-full bg-amber-300/70 animate-bounce" style={{ animationDelay: "150ms" }} />
-                      <span className="w-1.5 h-1.5 rounded-full bg-amber-300/70 animate-bounce" style={{ animationDelay: "300ms" }} />
+                    <span className="flex flex-col gap-2">
+                      {assistantStatus && (
+                        <span className="text-[11px] text-amber-300/80">{assistantStatus}</span>
+                      )}
+                      <span className="inline-flex gap-1.5 items-center h-5">
+                        <span className="w-2 h-2 rounded-full bg-amber-300/80 animate-bounce" style={{ animationDelay: "0ms" }} />
+                        <span className="w-2 h-2 rounded-full bg-amber-300/80 animate-bounce" style={{ animationDelay: "160ms" }} />
+                        <span className="w-2 h-2 rounded-full bg-amber-300/80 animate-bounce" style={{ animationDelay: "320ms" }} />
+                      </span>
+                    </span>
+                  ) : message.role === "assistant" && assistantBusy && idx === assistantMessages.length - 1 ? (
+                    <span>
+                      <p className="whitespace-pre-wrap break-words">{displayMessage(message.content)}<span className="inline-block w-0.5 h-3.5 bg-amber-300/70 ml-0.5 animate-pulse align-middle" /></p>
                     </span>
                   ) : (
                     <p className="whitespace-pre-wrap break-words">{displayMessage(message.content)}</p>
@@ -807,7 +835,7 @@ function AssistantPanel({
         )}
 
         {!showWelcome && (
-          <div className="flex flex-wrap gap-2">
+          <div className={`flex flex-wrap gap-2 transition-opacity ${assistantBusy ? "opacity-40 pointer-events-none" : ""}`}>
             {quickPrompts.map((prompt) => (
               <button
                 key={prompt}
@@ -873,7 +901,7 @@ function AssistantPanel({
           {assistantBusy ? (
             <span className="inline-flex items-center gap-2">
               <span className="w-3.5 h-3.5 rounded-full border-2 border-black/40 border-t-transparent animate-spin" />
-              Thinking…
+              Working…
             </span>
           ) : "Generate proposal"}
         </button>

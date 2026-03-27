@@ -41,15 +41,7 @@ npm install
 
 ### 2. Environment variables
 
-Copy `.env.local.example` to `.env.local` and fill in every value.
-
-This repo is set up for three scopes:
-
-- Development and Vercel Preview share the same non-production credentials.
-- Production uses its own Supabase project, Stripe keys, bucket, and app URL.
-- Shared service keys can stay the same across all environments if you want the simplest setup.
-
-Core variables used by the app:
+Copy `.env.local.example` to `.env.local` and fill in every value:
 
 ```bash
 # Supabase
@@ -72,7 +64,7 @@ GEMINI_API_KEY=<your-google-ai-key>
 RESEND_API_KEY=<your-resend-key>
 
 # App URL (no trailing slash)
-NEXT_PUBLIC_APP_URL=https://your-app.vercel.app   # or http://localhost:3000 locally
+NEXT_PUBLIC_BASE_URL=https://your-app.vercel.app   # or http://localhost:3000 locally
 
 # PostHog analytics
 NEXT_PUBLIC_POSTHOG_KEY=phc_...
@@ -163,88 +155,17 @@ Use the printed `whsec_...` value as `STRIPE_WEBHOOK_SECRET` in `.env.local`.
 
 ## Deploying to Vercel
 
-1. Push to GitHub and import the repo in Vercel.
-2. Add all environment variables in `Settings -> Environment Variables`.
-3. Set `NEXT_PUBLIC_APP_URL` to the correct URL for each environment.
-4. Deploy.
+1. Push to GitHub and import the repo in [Vercel](https://vercel.com/new)
+2. Add all environment variables to Vercel → **Settings → Environment Variables**
+3. Set `NEXT_PUBLIC_APP_URL` to your actual Vercel URL
+4. Deploy — migrations run automatically on first cold-start
 
-### Recommended branch workflow
+### Stripe webhook (production)
 
-Use a stable long-lived branch for QA instead of trying to bind one custom domain to every PR branch.
-
-- `master` -> Production -> `boq.aakitech.com`
-- `qa` -> QA / pre-production -> `boq-generator-qa.aakitech.com`
-- feature branches / PR branches -> normal Vercel preview URLs only
-
-Recommended release flow:
-
-1. Open a PR from your feature branch into `qa`
-2. Test the change on `boq-generator-qa.aakitech.com`
-3. Merge the PR into `qa`
-4. GitHub Actions automatically fast-forwards `master` to match `qa`
-5. Vercel deploys `master` to production
-
-### QA domain setup in Vercel
-
-If you want `boq-generator-qa.aakitech.com` to always show the latest QA build, connect it to a dedicated branch.
-
-In Vercel:
-
-1. Go to `Project -> Settings -> Domains`
-2. Add `boq-generator-qa.aakitech.com`
-3. Choose `Connect to an environment`
-4. Select `Preview`
-5. In the branch selector, choose the long-lived `qa` branch
-6. Save
-
-Important:
-
-- Do not use `All Branches` for this use case
-- Vercel needs a stable branch to keep one custom QA domain updated automatically
-- Each PR branch will still get its own Vercel preview URL, but the fixed QA domain should follow the `qa` branch only
-
-### QA environment variables
-
-Because this repo uses shared non-production credentials:
-
-- `Development` and `Preview` should keep using the same non-production Supabase and Stripe test values
-- The `qa` branch will automatically use the Preview environment values in Vercel
-- Set `NEXT_PUBLIC_APP_URL` for Preview to `https://boq-generator-qa.aakitech.com` if QA should use that custom domain consistently
-
-### Automatic promotion from `qa` to `master`
-
-This repo includes a GitHub Actions workflow at `.github/workflows/promote-qa-to-master.yml`.
-
-What it does:
-
-- Runs every time code is pushed to `qa`
-- Verifies that `master` is behind `qa` instead of diverged
-- Fast-forwards `master` to the exact same commit as `qa`
-- Lets Vercel deploy `master` as Production automatically
-
-Important GitHub setup:
-
-1. Create the `qa` branch in GitHub
-2. In GitHub, keep `master` protected with pull requests if you want review on direct feature work
-3. Allow GitHub Actions to update `master`, or the workflow push will be blocked by branch protection
-
-If your branch protection blocks the default `GITHUB_TOKEN`, you will need one of these:
-
-- enable GitHub Actions to bypass protection for `master`
-- or use a repository secret with a PAT that has permission to push to `master`
-
-Important workflow rule:
-
-- feature branches should open PRs into `qa`, not `master`
-- `qa` remains a Preview deployment in Vercel
-- `master` remains the Production branch in Vercel
-
-### Stripe webhook
-
-1. In Stripe, add a webhook endpoint.
-2. Use `https://<your-app>.vercel.app/api/webhooks/stripe`.
-3. Subscribe to `checkout.session.completed`.
-4. Copy the signing secret into `STRIPE_WEBHOOK_SECRET`.
+1. Stripe Dashboard → **Developers → Webhooks → Add endpoint**
+2. URL: `https://<your-app>.vercel.app/api/webhooks/stripe`
+3. Events to listen for: `checkout.session.completed`
+4. Copy the signing secret (`whsec_...`) into Vercel env as `STRIPE_WEBHOOK_SECRET`
 
 ### Storage bucket
 

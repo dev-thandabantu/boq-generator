@@ -644,7 +644,7 @@ function GenerateBOQTab() {
         {stage === "generating" && (
           <div className="space-y-2">
             <Progress value={60} className="h-1.5 bg-white/10" />
-            <p className="text-xs text-gray-400">AI is reading your Scope of Work… this takes about 30–60 seconds</p>
+            <p className="text-xs text-gray-400">AI is analysing your Scope of Work… this takes about 30–60 seconds</p>
           </div>
         )}
       </div>
@@ -711,9 +711,16 @@ function GenerateBOQTab() {
 
       {isProcessing && (
         <div className="mt-6 space-y-2">
-          <Progress value={stage === "extracting" ? 60 : 90} className="h-1.5 bg-white/10" />
+          <Progress
+            value={stage === "extracting" ? 55 : stage === "classifying" ? 82 : 96}
+            className="h-1.5 bg-white/10"
+          />
           <p className="text-sm text-gray-400 text-center">
-            {stage === "extracting" ? "Extracting text and validating document..." : "Redirecting to payment..."}
+            {stage === "extracting"
+              ? "Reading your document…"
+              : stage === "classifying"
+              ? "Identifying scope items…"
+              : "Redirecting to payment…"}
           </p>
         </div>
       )}
@@ -1194,8 +1201,8 @@ export default function UploadPage() {
       {/* Nav */}
       <nav className="fixed top-0 left-0 right-0 z-20 border-b border-white/5 bg-[#0f0f0f]/80 backdrop-blur">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <a href="/" className="text-sm font-semibold text-white">
-            BOQ <span className="text-amber-400">Generator</span>
+          <a href="/">
+            <img src="/boqlogo.png" alt="BOQ Generator" className="h-7 w-auto" width="28" height="28" />
           </a>
           <a href="/dashboard" className="text-xs text-gray-500 hover:text-gray-300 transition-colors">
             My BOQs →
