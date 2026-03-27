@@ -1569,6 +1569,29 @@ function defaultSkipReason(category: BOQPricingCategory): BOQRateSkipReason {
   return "specialist_item_requires_local_precedent";
 }
 
+function normalizeDescriptionForSimilarity(description: string): string {
+  return description
+    .toLowerCase()
+    .replace(/\bditto\b/g, " ")
+    .replace(/\bincluding\b/g, " ")
+    .replace(/\bincl\b/g, " ")
+    .replace(/\bas described\b/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function descriptionSimilarity(a: string, b: string): number {
+  const tokensA = new Set(normalizeDescriptionForSimilarity(a).split(" ").filter(Boolean));
+  const tokensB = new Set(normalizeDescriptionForSimilarity(b).split(" ").filter(Boolean));
+  if (tokensA.size === 0 || tokensB.size === 0) return 0;
+  let intersection = 0;
+  for (const token of tokensA) {
+    if (tokensB.has(token)) intersection += 1;
+  }
+  return intersection / Math.max(tokensA.size, tokensB.size);
+}
+
 function summarizeRateQuality(
   boq: BOQDocument,
   metrics: {
@@ -1639,6 +1662,7 @@ async function fillRatesPass(
 
   let localMatches = 0;
   let gatedSpecialistRows = 0;
+  const billLocalRates = new Map<string, Array<{ description: string; unit: string; rate: number }>>();
   const unresolvedItems: Array<{
     item_key: string;
     description: string;
@@ -1657,7 +1681,33 @@ async function fillRatesPass(
         const pricingCategory = classifyPricingCategory(item.description, item.unit);
         const key = normalizeRateKey(item.description, item.unit);
         const exactMatches = exactRateMap.get(key) ?? [];
-        const matchedRate = median(exactMatches);
+        let matchedRate = median(exactMatches);
+        let matchReason = "Reused an exact matching rate from another row in the uploaded workbook.";
+
+        const billKey = `${normalizeRateKey(bill.title, "")}::${normalizeRateKey(item.workbook_context ?? "", "")}`;
+        const priorBillRates = billLocalRates.get(billKey) ?? [];
+
+        if (matchedRate === null && pricingCategory === "ditto_reference") {
+          const inherited = [...priorBillRates]
+            .reverse()
+            .find((candidate) => candidate.unit === item.unit || !item.unit || !candidate.unit);
+          if (inherited) {
+            matchedRate = inherited.rate;
+            matchReason = "Inherited the nearest safe local rate for a ditto/reference row in the same bill section.";
+          }
+        }
+
+        if (matchedRate === null && !requiresLocalPrecedent(pricingCategory)) {
+          const nearDuplicate = priorBillRates.find((candidate) =>
+            candidate.unit === item.unit &&
+            descriptionSimilarity(candidate.description, item.description) >= 0.72
+          );
+          if (nearDuplicate) {
+            matchedRate = nearDuplicate.rate;
+            matchReason = "Reused a near-duplicate rate from the same bill section.";
+          }
+        }
+
         if (matchedRate === null && requiresLocalPrecedent(pricingCategory)) {
           gatedSpecialistRows += 1;
           return {
@@ -1683,13 +1733,16 @@ async function fillRatesPass(
         }
 
         localMatches += 1;
+        const nextBillRates = billLocalRates.get(billKey) ?? [];
+        nextBillRates.push({ description: item.description, unit: item.unit, rate: matchedRate });
+        billLocalRates.set(billKey, nextBillRates);
         return {
           ...item,
           pricing_category: pricingCategory,
           rate: matchedRate,
           amount: item.qty !== null ? +(item.qty * matchedRate).toFixed(2) : null,
           rate_source: "workbook_local_pattern",
-          rate_source_detail: "Reused an exact matching rate from another row in the uploaded workbook.",
+          rate_source_detail: matchReason,
           rate_confidence: 0.95,
           rate_skip_reason: null,
         };

@@ -28,6 +28,16 @@ function GeneratingContent() {
     }
   }
 
+  async function waitForCompletedBoq(currentSessionId: string): Promise<string | null> {
+    const attempts = 6;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const boqId = await recoverCompletedBoq(currentSessionId);
+      if (boqId) return boqId;
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    return null;
+  }
+
   useEffect(() => {
     if (started.current) return;
     started.current = true;
@@ -160,7 +170,8 @@ function GeneratingContent() {
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Something went wrong";
-        const recoveredBoqId = sessionId ? await recoverCompletedBoq(sessionId) : null;
+        setStatusText("Checking whether your BOQ finished in the background...");
+        const recoveredBoqId = sessionId ? await waitForCompletedBoq(sessionId) : null;
         if (recoveredBoqId) {
           router.push(`/boq/${recoveredBoqId}`);
           return;
