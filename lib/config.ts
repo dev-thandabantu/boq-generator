@@ -10,6 +10,8 @@ const REQUIRED_SERVER_VARS = [
   "GEMINI_API_KEY",
   "STRIPE_SECRET_KEY",
   "STRIPE_WEBHOOK_SECRET",
+  "NEXT_PUBLIC_APP_URL",
+  "SUPABASE_STORAGE_BUCKET",
 ] as const;
 
 const missing = REQUIRED_SERVER_VARS.filter((key) => !process.env[key]);
@@ -27,5 +29,7 @@ export const config = {
   geminiApiKey: process.env.GEMINI_API_KEY!,
   stripeSecretKey: process.env.STRIPE_SECRET_KEY!,
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET!,
+  appUrl: process.env.NEXT_PUBLIC_APP_URL!,
+  storageBucket: process.env.SUPABASE_STORAGE_BUCKET!,
   isProduction: process.env.NODE_ENV === "production",
 } as const;

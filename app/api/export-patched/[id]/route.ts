@@ -5,7 +5,7 @@ import { patchExcelWithRates } from "@/lib/excel";
 
 export const runtime = "nodejs";
 
-const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || "boq-generator-dev";
+const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET ?? "boq-generator-dev";
 
 export async function GET(
   _req: NextRequest,

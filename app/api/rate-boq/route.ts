@@ -10,7 +10,7 @@ import type { PostgrestError } from "@supabase/supabase-js";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || "boq-generator-dev";
+const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET ?? "boq-generator-dev";
 
 function isMissingColumnError(error: PostgrestError | null, columns: string[]): boolean {
   if (!error) return false;
@@ -72,6 +72,7 @@ export async function POST(req: NextRequest) {
     const storageKey = metadata.storage_key;
     const rateColHeader = metadata.rate_col_header ?? "";
     const amountColHeader = metadata.amount_col_header ?? "";
+    const boqId = metadata.boq_id ?? null;
 
     if (!storageKey) {
       return NextResponse.json({ error: "Missing storage key in payment session" }, { status: 400 });
@@ -86,7 +87,7 @@ export async function POST(req: NextRequest) {
 
     const serviceClient = createServiceClient();
 
-    // Idempotency: if this Stripe session already produced a BOQ, return it
+    // Idempotency: if this Stripe session already produced a paid BOQ, return it
     const { data: existingBoq } = await serviceClient
       .from("boqs")
       .select("id, data")
@@ -120,77 +121,109 @@ export async function POST(req: NextRequest) {
     const boq = await fillMissingRatesInExistingBOQ(workbookBoq, rate_context);
 
     const title = boq.project || "Rated BOQ";
+    const itemCount = boq.bills?.flatMap((b) => b.items).filter((i) => !i.is_header).length ?? 0;
 
-    // Save BOQ to database
-    let { data: saved, error: dbError } = await serviceClient
-      .from("boqs")
-      .insert({
-        user_id: user.id,
-        title,
-        data: boq,
-        stripe_session_id: session_id,
-        source_excel_key: storageKey,
-        rate_col_header: rateColHeader || null,
-        amount_col_header: amountColHeader || null,
-      })
-      .select("id")
-      .single();
+    let savedId: string;
 
-    if (isMissingColumnError(dbError, ["source_excel_key", "rate_col_header", "amount_col_header"])) {
-      logger.warn("Rate BOQ metadata columns missing; retrying save without Excel metadata", {
-        code: dbError?.code,
-        message: dbError?.message,
-        details: dbError?.details,
-        hint: dbError?.hint,
-        route: "rate-boq",
-      });
+    if (boqId) {
+      // New flow: UPDATE the preview BOQ row created by ingest-boq
+      const { data: updated, error: updateError } = await serviceClient
+        .from("boqs")
+        .update({
+          title,
+          data: boq,
+          stripe_session_id: session_id,
+          source_excel_key: storageKey,
+          payment_status: "paid",
+          rate_col_header: rateColHeader || null,
+          amount_col_header: amountColHeader || null,
+        })
+        .eq("id", boqId)
+        .eq("user_id", user.id)
+        .select("id")
+        .single();
 
-      ({ data: saved, error: dbError } = await serviceClient
+      if (updateError || !updated) {
+        logger.error("Failed to update preview BOQ with rates", { error: String(updateError), boqId, route: "rate-boq" });
+        return NextResponse.json({ boq, boq_id: null });
+      }
+      savedId = updated.id;
+    } else {
+      // Legacy flow: INSERT a new BOQ row (no boq_id in metadata)
+      let { data: saved, error: dbError } = await serviceClient
         .from("boqs")
         .insert({
           user_id: user.id,
           title,
           data: boq,
           stripe_session_id: session_id,
+          source_excel_key: storageKey,
+          rate_col_header: rateColHeader || null,
+          amount_col_header: amountColHeader || null,
+          payment_status: "paid",
         })
         .select("id")
-        .single());
-    }
+        .single();
 
-    if (dbError) {
-      if (isDuplicateStripeSessionError(dbError)) {
-        logger.warn("Duplicate rate-boq save detected; loading existing row", {
-          code: dbError.code,
-          message: dbError.message,
-          details: dbError.details,
+      if (isMissingColumnError(dbError, ["source_excel_key", "rate_col_header", "amount_col_header"])) {
+        logger.warn("Rate BOQ metadata columns missing; retrying save without Excel metadata", {
+          code: dbError?.code,
+          message: dbError?.message,
+          details: dbError?.details,
+          hint: dbError?.hint,
           route: "rate-boq",
         });
 
-        const { data: concurrentBoq } = await serviceClient
+        ({ data: saved, error: dbError } = await serviceClient
           .from("boqs")
-          .select("id, data")
-          .eq("stripe_session_id", session_id)
-          .maybeSingle();
-
-        if (concurrentBoq?.id) {
-          return NextResponse.json({ boq: concurrentBoq.data, boq_id: concurrentBoq.id });
-        }
+          .insert({
+            user_id: user.id,
+            title,
+            data: boq,
+            stripe_session_id: session_id,
+            payment_status: "paid",
+          })
+          .select("id")
+          .single());
       }
 
-      logger.error("Failed to save rated BOQ", {
-        error: String(dbError),
-        code: dbError.code,
-        message: dbError.message,
-        details: dbError.details,
-        hint: dbError.hint,
-        route: "rate-boq",
-      });
-      return NextResponse.json({ boq, boq_id: null });
-    }
+      if (dbError) {
+        if (isDuplicateStripeSessionError(dbError)) {
+          logger.warn("Duplicate rate-boq save detected; loading existing row", {
+            code: dbError.code,
+            message: dbError.message,
+            details: dbError.details,
+            route: "rate-boq",
+          });
 
-    if (!saved?.id) {
-      logger.error("Rated BOQ save returned no row id", { route: "rate-boq" });
-      return NextResponse.json({ boq, boq_id: null });
+          const { data: concurrentBoq } = await serviceClient
+            .from("boqs")
+            .select("id, data")
+            .eq("stripe_session_id", session_id)
+            .maybeSingle();
+
+          if (concurrentBoq?.id) {
+            return NextResponse.json({ boq: concurrentBoq.data, boq_id: concurrentBoq.id });
+          }
+        }
+
+        logger.error("Failed to save rated BOQ", {
+          error: String(dbError),
+          code: dbError.code,
+          message: dbError.message,
+          details: dbError.details,
+          hint: dbError.hint,
+          route: "rate-boq",
+        });
+        return NextResponse.json({ boq, boq_id: null });
+      }
+
+      if (!saved?.id) {
+        logger.error("Rated BOQ save returned no row id", { route: "rate-boq" });
+        return NextResponse.json({ boq, boq_id: null });
+      }
+
+      savedId = saved.id;
     }
 
     // Record payment
@@ -199,17 +232,16 @@ export async function POST(req: NextRequest) {
         stripe_session_id: session_id,
         stripe_payment_intent: stripeSession.payment_intent as string | null,
         user_id: user.id,
-        amount_cents: stripeSession.amount_total ?? 10000,
+        amount_cents: stripeSession.amount_total ?? 2000,
         currency: stripeSession.currency ?? "usd",
         status: "completed",
-        boq_id: saved.id,
+        boq_id: savedId,
       },
       { onConflict: "stripe_session_id", ignoreDuplicates: false }
     );
 
-    const itemCount = boq.bills?.flatMap((b) => b.items).filter((i) => !i.is_header).length ?? 0;
-    trackEvent(user.id, "boq_rated", { boqId: saved.id, itemCount, storageKey });
-    return NextResponse.json({ boq, boq_id: saved.id });
+    trackEvent(user.id, "boq_rated", { boqId: savedId, itemCount, storageKey });
+    return NextResponse.json({ boq, boq_id: savedId });
   } catch (err) {
     logger.error("rate-boq error", { error: err instanceof Error ? err.message : String(err), route: "rate-boq" });
     const message = err instanceof Error ? err.message : "Unknown error";

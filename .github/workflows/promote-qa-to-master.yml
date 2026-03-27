@@ -1,0 +1,51 @@
+name: Promote QA to Master
+
+on:
+  push:
+    branches: [qa]
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    name: Fast-forward master to qa
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch branches
+        run: |
+          git fetch origin qa master
+
+      - name: Ensure master is an ancestor of qa
+        run: |
+          if ! git merge-base --is-ancestor origin/master origin/qa; then
+            echo "::error::master has commits that are not in qa. Refusing automatic promotion."
+            echo "::error::Bring master back in sync with qa or use a manual release PR."
+            exit 1
+          fi
+
+      - name: Skip when master already matches qa
+        id: compare
+        run: |
+          if [ "$(git rev-parse origin/master)" = "$(git rev-parse origin/qa)" ]; then
+            echo "noop=true" >> "$GITHUB_OUTPUT"
+            echo "master already matches qa"
+          else
+            echo "noop=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fast-forward master
+        if: steps.compare.outputs.noop == 'false'
+        run: |
+          git push origin origin/qa:refs/heads/master

@@ -12,9 +12,7 @@ function GeneratingContent() {
   const ph = usePostHog();
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState(10);
-  const [statusText, setStatusText] = useState(
-    "AI is reading your Scope of Work and extracting bill items..."
-  );
+  const [statusText, setStatusText] = useState("Verifying payment and preparing your BOQ...");
   const started = useRef(false);
 
   async function recoverCompletedBoq(currentSessionId: string): Promise<string | null> {
@@ -42,7 +40,7 @@ function GeneratingContent() {
     if (started.current) return;
     started.current = true;
 
-    async function generate() {
+    async function unlock() {
       if (!sessionId) {
         setError("Missing payment session. Please start over.");
         return;
@@ -64,7 +62,7 @@ function GeneratingContent() {
             setStatusText(
               isRateBoq
                 ? "Matching Zambian market rates to your items..."
-                : "Classifying trades, quantities, and units..."
+                : "Finalising your BOQ..."
             );
           }
         }, 2000);
@@ -83,35 +81,13 @@ function GeneratingContent() {
             body: JSON.stringify({ session_id: sessionId, rate_context: rateContext }),
           });
         } else {
-          const bundleRaw = localStorage.getItem("boq_document_bundle");
-          const text = localStorage.getItem("boq_text");
-          const documents = bundleRaw ? JSON.parse(bundleRaw) : null;
-          if (!text && !documents?.length) {
-            setError(
-              "Your session expired. If you were charged, please contact us with your payment reference."
-            );
-            return;
-          }
-          const suggestRates = localStorage.getItem("boq_suggest_rates") === "1";
-          const isSOW = localStorage.getItem("boq_is_sow") !== "0";
-          const sowWarning = localStorage.getItem("boq_sow_warning") || null;
-          const documentType = localStorage.getItem("boq_document_type") || null;
-          const shouldBlockGeneration = localStorage.getItem("boq_should_block_generation") === "1";
-
-          setStatusText("AI is reading your Scope of Work and extracting bill items...");
-          res = await fetch("/api/generate", {
+          // generate_boq: BOQ was already generated before payment.
+          // Just verify payment and unlock the saved preview.
+          setStatusText("Verifying payment and unlocking your BOQ...");
+          res = await fetch("/api/unlock-boq", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              text,
-              documents,
-              session_id: sessionId,
-              suggest_rates: suggestRates,
-              is_sow: isSOW,
-              sow_warning: sowWarning,
-              document_type: documentType,
-              should_block_generation: shouldBlockGeneration,
-            }),
+            body: JSON.stringify({ session_id: sessionId }),
           });
         }
 
@@ -122,7 +98,7 @@ function GeneratingContent() {
           try {
             const body = await res.json();
             e = body.error;
-          } catch { /* non-JSON error body (e.g. Vercel timeout HTML) */ }
+          } catch { /* non-JSON error body */ }
           if (res.status === 402)
             throw new Error("Payment could not be verified. Please contact support.");
           if (res.status === 429)
@@ -130,14 +106,14 @@ function GeneratingContent() {
           if (res.status === 503)
             throw new Error("AI service is temporarily busy. Please wait a moment and try again.");
           if (res.status === 504 || !e)
-            throw new Error("The request timed out. Your BOQ may be large — please try again.");
-          throw new Error(e || (isRateBoq ? "Rate filling failed" : "BOQ generation failed"));
+            throw new Error("The request timed out. Please try again.");
+          throw new Error(e || (isRateBoq ? "Rate filling failed" : "Could not unlock BOQ"));
         }
 
         const { boq, boq_id } = await res.json();
         setProgress(100);
 
-        ph.capture(isRateBoq ? "boq_rates_filled" : "boq_generated", {
+        ph.capture(isRateBoq ? "boq_rates_filled" : "boq_unlocked", {
           boq_id,
           bill_count: boq?.bills?.length ?? 0,
           item_count: (boq?.bills ?? []).reduce(
@@ -187,7 +163,7 @@ function GeneratingContent() {
       }
     }
 
-    generate();
+    unlock();
   }, [sessionId, router]);
 
   return (
@@ -243,12 +219,12 @@ function GeneratingContent() {
               </svg>
             </div>
             <div>
-              <h2 className="text-2xl font-bold text-white mb-2">Generating your BOQ</h2>
+              <h2 className="text-2xl font-bold text-white mb-2">Preparing your BOQ</h2>
               <p className="text-gray-400 text-sm">{statusText}</p>
             </div>
             <div className="space-y-2">
               <Progress value={progress} className="h-1.5 bg-white/10" />
-              <p className="text-xs text-gray-500">This takes about 30–60 seconds</p>
+              <p className="text-xs text-gray-500">Almost there…</p>
             </div>
           </div>
         )}

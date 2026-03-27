@@ -5,9 +5,10 @@ import { Progress } from "@/components/ui/progress";
 import Footer from "@/components/Footer";
 import { usePostHog } from "posthog-js/react";
 import type { BOQDocumentType, RequiredAttachment, SourceBundleStatus } from "@/lib/types";
+import BOQPricingCard from "@/components/BOQPricingCard";
 
 type Tab = "generate" | "rate";
-type Stage = "idle" | "extracting" | "ready" | "paying" | "error";
+type Stage = "idle" | "extracting" | "ready" | "generating" | "preview" | "paying" | "error";
 type ExtractedDoc = {
   document_id: string;
   name: string;
@@ -37,6 +38,13 @@ function GenerateBOQTab() {
   const [suggestRates, setSuggestRates] = useState(false);
   const [sowWarning, setSowWarning] = useState<string | null>(null);
   const [isSOW, setIsSOW] = useState<boolean | null>(null);
+  const [boqId, setBoqId] = useState<string | null>(null);
+  const [boqPreview, setBoqPreview] = useState<{
+    billCount: number;
+    itemCount: number;
+    tier: { label: string; displayUsd: string; usdCents: number };
+    approxRangeLabel: string;
+  } | null>(null);
   const [classification, setClassification] = useState<{
     documentType: BOQDocumentType | null;
     confidence: number | null;
@@ -69,6 +77,7 @@ function GenerateBOQTab() {
   );
   const primaryActionLabel = useMemo(() => {
     if (stage === "paying") return "Opening secure checkout...";
+    if (stage === "generating") return "Generating your BOQ...";
     if (classification?.shouldBlockGeneration && hasAllRequiredAttachments && !hasProcessedAllRequiredAttachments) {
       return "Processing attachments...";
     }
@@ -77,7 +86,7 @@ function GenerateBOQTab() {
         ? "Re-check attachments"
         : "Add required attachments to continue";
     }
-    return "Pay $100 & Generate BOQ →";
+    return "Generate BOQ →";
   }, [classification, hasAllRequiredAttachments, hasProcessedAllRequiredAttachments, stage]);
 
   function handleFile(f: File) {
@@ -307,7 +316,7 @@ function GenerateBOQTab() {
     }
   }
 
-  async function handleCheckout() {
+  async function handleGenerate() {
     if (!file) return;
     if (needsAttachmentRecheck) {
       await handleExtract();
@@ -319,18 +328,57 @@ function GenerateBOQTab() {
     }
     localStorage.setItem("boq_suggest_rates", suggestRates ? "1" : "0");
     localStorage.setItem("boq_type", "generate");
-      ph.capture("payment_initiated", {
-        suggest_rates: suggestRates,
-        supporting_docs_count: attachedSupportingCount,
+    ph.capture("generate_initiated", {
+      suggest_rates: suggestRates,
+      supporting_docs_count: attachedSupportingCount,
+    });
+    setStage("generating");
+    setError(null);
+
+    try {
+      const bundleRaw = localStorage.getItem("boq_document_bundle");
+      const text = localStorage.getItem("boq_text");
+      const documents = bundleRaw ? JSON.parse(bundleRaw) : null;
+
+      const res = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text,
+          documents,
+          suggest_rates: suggestRates,
+          is_sow: isSOW,
+          sow_warning: sowWarning,
+          document_type: classification?.documentType,
+          should_block_generation: classification?.shouldBlockGeneration,
+        }),
       });
+      if (!res.ok) {
+        const body = await res.json();
+        throw new Error(body.error || "BOQ generation failed");
+      }
+      const { boq_id, boq_preview } = await res.json();
+      setBoqId(boq_id);
+      setBoqPreview(boq_preview);
+      setStage("preview");
+    } catch (err) {
+      setStage("error");
+      const msg = err instanceof Error ? err.message : "Something went wrong";
+      setError(msg === "Failed to fetch" ? "Network error. Check your connection and try again." : msg);
+    }
+  }
+
+  async function handleCheckout() {
+    if (!boqId) return;
     setStage("paying");
     setError(null);
+    ph.capture("payment_initiated", { type: "generate_boq", boqId });
 
     try {
       const res = await fetch("/api/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename: file.name, type: "generate_boq" }),
+        body: JSON.stringify({ boq_id: boqId, type: "generate_boq" }),
       });
       if (!res.ok) {
         const { error: e } = await res.json();
@@ -339,15 +387,25 @@ function GenerateBOQTab() {
       const { url } = await res.json();
       window.location.href = url;
     } catch (err) {
-      setStage("error");
+      setStage("preview");
       const msg = err instanceof Error ? err.message : "Something went wrong";
       setError(msg === "Failed to fetch" ? "Network error. Check your connection and try again." : msg);
     }
   }
 
-  const isProcessing = stage === "extracting" || stage === "paying";
+  const isProcessing = stage === "extracting" || stage === "generating" || stage === "paying";
 
-  if (stage === "ready" || stage === "paying") {
+  if (stage === "preview" && boqPreview) {
+    return (
+      <BOQPricingCard
+        boqPreview={boqPreview}
+        onUnlock={handleCheckout}
+        paying={false}
+      />
+    );
+  }
+
+  if (stage === "ready" || stage === "paying" || stage === "generating") {
     return (
       <div className="text-center space-y-6">
         <div>
@@ -529,11 +587,11 @@ function GenerateBOQTab() {
           <div className="flex items-start justify-between">
             <div>
               <p className="text-white font-semibold text-lg">BOQ Generation</p>
-              <p className="text-gray-400 text-sm mt-0.5">One-time · instant delivery</p>
+              <p className="text-gray-400 text-sm mt-0.5">One-time · priced by project size</p>
             </div>
             <div className="text-right">
-              <p className="text-2xl font-bold text-amber-400">$100</p>
-              <p className="text-xs text-gray-500">USD</p>
+              <p className="text-lg font-bold text-amber-400">From $20</p>
+              <p className="text-xs text-gray-500">USD · based on BOQ value</p>
             </div>
           </div>
           <ul className="space-y-2">
@@ -567,25 +625,26 @@ function GenerateBOQTab() {
 
         <button
           className="w-full py-3.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-black font-semibold text-sm transition-colors disabled:opacity-70 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
-          onClick={handleCheckout}
+          onClick={handleGenerate}
           disabled={
             stage === "paying" ||
+            stage === "generating" ||
             isSOW === false ||
             (classification?.shouldBlockGeneration && hasAllRequiredAttachments && !hasProcessedAllRequiredAttachments) ||
             Boolean(classification?.shouldBlockGeneration && !needsAttachmentRecheck)
           }
         >
-          {stage === "paying" ? (
-            <><span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-black/60 border-t-transparent animate-spin" />Opening secure checkout...</>
+          {(stage === "paying" || stage === "generating") ? (
+            <><span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-black/60 border-t-transparent animate-spin" />{primaryActionLabel}</>
           ) : primaryActionLabel}
         </button>
 
-        <p className="text-xs text-gray-600">Secure payment via Stripe. You will be redirected back after payment.</p>
+        <p className="text-xs text-gray-600">Price is based on the estimated value of your BOQ. No charge until you review and confirm.</p>
 
-        {stage === "paying" && (
+        {stage === "generating" && (
           <div className="space-y-2">
-            <Progress value={92} className="h-1.5 bg-white/10" />
-            <p className="text-xs text-gray-400">Redirecting to Stripe checkout...</p>
+            <Progress value={60} className="h-1.5 bg-white/10" />
+            <p className="text-xs text-gray-400">AI is reading your Scope of Work… this takes about 30–60 seconds</p>
           </div>
         )}
       </div>
@@ -718,6 +777,8 @@ function RateBOQTab() {
   const [dragging, setDragging] = useState(false);
   const [storageKey, setStorageKey] = useState<string | null>(null);
   const [preview, setPreview] = useState<BOQPreview | null>(null);
+  const [rateBoqId, setRateBoqId] = useState<string | null>(null);
+  const [rateAmountCents, setRateAmountCents] = useState<number>(2000);
   const [ctx, setCtx] = useState<RateContext>(DEFAULT_CONTEXT);
   const [customMargin, setCustomMargin] = useState(false);
   const ph = usePostHog();
@@ -748,9 +809,11 @@ function RateBOQTab() {
         const { error: e } = await res.json();
         throw new Error(e || "Validation failed");
       }
-      const { storageKey: key, preview: p } = await res.json();
+      const { storageKey: key, preview: p, boq_id: bid, amountCents: ac } = await res.json();
       setStorageKey(key);
       setPreview(p);
+      setRateBoqId(bid ?? null);
+      setRateAmountCents(ac ?? 2000);
       ph.capture("excel_boq_uploaded", {
         total_items: p.totalItems,
         missing_rate_count: p.missingRateCount,
@@ -769,23 +832,28 @@ function RateBOQTab() {
   }
 
   async function handleCheckout() {
-    if (!storageKey || !preview) return;
+    if (!preview) return;
     localStorage.setItem("boq_type", "rate_boq");
     localStorage.setItem("boq_rate_context", JSON.stringify(ctx));
-    ph.capture("payment_initiated", { type: "rate_boq", province: ctx.province });
+    ph.capture("payment_initiated", { type: "rate_boq", province: ctx.province, boqId: rateBoqId });
     setStage("paying");
     setError(null);
 
     try {
+      const checkoutBody = rateBoqId
+        ? { type: "rate_boq", boq_id: rateBoqId }
+        : {
+            // Legacy fallback if boq_id not available
+            type: "rate_boq",
+            storageKey,
+            rateColHeader: preview.rateColumnHeader ?? "",
+            amountColHeader: preview.amountColumnHeader ?? "",
+          };
+
       const res = await fetch("/api/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "rate_boq",
-          storageKey,
-          rateColHeader: preview.rateColumnHeader ?? "",
-          amountColHeader: preview.amountColumnHeader ?? "",
-        }),
+        body: JSON.stringify(checkoutBody),
       });
       if (!res.ok) {
         const { error: e } = await res.json();
@@ -993,7 +1061,7 @@ function RateBOQTab() {
               <p className="text-gray-400 text-sm mt-0.5">One-time · instant delivery</p>
             </div>
             <div className="text-right">
-              <p className="text-2xl font-bold text-amber-400">$100</p>
+              <p className="text-2xl font-bold text-amber-400">${(rateAmountCents / 100).toFixed(0)}</p>
               <p className="text-xs text-gray-500">USD</p>
             </div>
           </div>
@@ -1019,7 +1087,7 @@ function RateBOQTab() {
           onClick={handleCheckout} disabled={stage === "paying"}>
           {stage === "paying" ? (
             <><span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-black/60 border-t-transparent animate-spin" />Opening secure checkout...</>
-          ) : "Pay $100 & Add Rates →"}
+          ) : `Pay $${(rateAmountCents / 100).toFixed(0)} & Add Rates →`}
         </button>
 
         <p className="text-xs text-gray-600">Secure payment via Stripe. You will be redirected back after payment.</p>

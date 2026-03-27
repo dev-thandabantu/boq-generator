@@ -4,12 +4,13 @@ import { extractWorkbookBOQ } from "@/lib/excel";
 import { randomUUID } from "crypto";
 import { logger } from "@/lib/logger";
 import { trackEvent } from "@/lib/analytics";
+import { getTierForItemCount, loadRateTiers } from "@/lib/pricing";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB (storage bucket limit)
-const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || "boq-generator-dev";
+const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET ?? "boq-generator-dev";
 
 export async function POST(req: NextRequest) {
   try {
@@ -102,12 +103,41 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Compute pricing tier based on item count (no rates to sum yet)
+    const rateTiers = loadRateTiers();
+    const pricingTier = getTierForItemCount(measurableItems.length, rateTiers);
+
+    // Save a preview BOQ row so the boq_id can be passed through checkout → rate-boq
+    const { data: previewBoq, error: dbError } = await serviceClient
+      .from("boqs")
+      .insert({
+        user_id: user.id,
+        title: file.name.replace(/\.[^/.]+$/, "") || "Untitled BOQ",
+        data: workbookBoq,
+        payment_status: "preview",
+        source_excel_key: storageKey,
+        rate_col_header: workbookPreservation?.rate_column_header ?? null,
+        amount_col_header: workbookPreservation?.amount_column_header ?? null,
+      })
+      .select("id")
+      .single();
+
+    if (dbError) {
+      logger.error("Failed to save preview BOQ for rate_boq", { error: String(dbError), route: "ingest-boq" });
+      // Non-fatal: return without boq_id; checkout will fall back to legacy flow
+    }
+
     trackEvent(user.id, "excel_ingested", {
       totalItems: measurableItems.length,
       missingRateCount,
+      pricingTier: pricingTier.label,
+      amountCents: pricingTier.usdCents,
     });
+
     return NextResponse.json({
       storageKey,
+      boq_id: previewBoq?.id ?? null,
+      amountCents: pricingTier.usdCents,
       preview: {
         totalItems: measurableItems.length,
         missingRateCount,
