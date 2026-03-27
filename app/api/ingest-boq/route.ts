@@ -11,7 +11,7 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB (storage bucket limit)
-const STORAGE_BUCKET = "boq-generator-dev";
+const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET ?? "boq-generator-dev";
 
 export async function POST(req: NextRequest) {
   try {

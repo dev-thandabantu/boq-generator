@@ -9,7 +9,7 @@ import { trackEvent } from "@/lib/analytics";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const STORAGE_BUCKET = "boq-generator-dev";
+const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET ?? "boq-generator-dev";
 
 function classifyError(message: string): { status: number; safeMessage: string } {
   const lower = message.toLowerCase();

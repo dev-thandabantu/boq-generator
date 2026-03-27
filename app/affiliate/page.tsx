@@ -42,7 +42,7 @@ export default async function AffiliatePage() {
     stats = { conversions, pending_commission_cents: pendingCommissionCents, paid_commission_cents: paidCommissionCents };
   }
 
-  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL ?? "";
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? "";
   const referralUrl = affiliate ? `${baseUrl}/?ref=${affiliate.referral_code}` : null;
 
   return (
