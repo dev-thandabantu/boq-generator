@@ -15,6 +15,27 @@ function GeneratingContent() {
   const [statusText, setStatusText] = useState("Verifying payment and preparing your BOQ...");
   const started = useRef(false);
 
+  async function recoverCompletedBoq(currentSessionId: string): Promise<string | null> {
+    try {
+      const res = await fetch(`/api/boqs/by-session?session_id=${encodeURIComponent(currentSessionId)}`);
+      if (!res.ok) return null;
+      const body = (await res.json()) as { boq_id?: string | null };
+      return body.boq_id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function waitForCompletedBoq(currentSessionId: string): Promise<string | null> {
+    const attempts = 6;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const boqId = await recoverCompletedBoq(currentSessionId);
+      if (boqId) return boqId;
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    return null;
+  }
+
   useEffect(() => {
     if (started.current) return;
     started.current = true;
@@ -120,15 +141,21 @@ function GeneratingContent() {
         if (boq_id) {
           router.push(`/boq/${boq_id}`);
         } else {
-          sessionStorage.setItem("boq_data", JSON.stringify(boq));
+          localStorage.setItem("boq_data", JSON.stringify(boq));
           router.push("/boq");
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Something went wrong";
-        setStatusText("Stopped due to an error.");
+        setStatusText("Checking whether your BOQ finished in the background...");
+        const recoveredBoqId = sessionId ? await waitForCompletedBoq(sessionId) : null;
+        if (recoveredBoqId) {
+          router.push(`/boq/${recoveredBoqId}`);
+          return;
+        }
+        setStatusText("Generation stopped due to an error.");
         setError(
           msg === "Failed to fetch"
-            ? "Network error. Check your connection and try again."
+            ? "The connection dropped while the BOQ was generating. We checked for a completed result but did not find one yet. Please try again."
             : msg
         );
       } finally {

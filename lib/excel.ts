@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx";
-import type { BOQDocument, BOQItem } from "./types";
+import type { BOQBill, BOQDocument, BOQItem, BOQWorkbookPreservation } from "./types";
 
 type CellStyle = {
   font?: { bold?: boolean; sz?: number; color?: { rgb: string } };
@@ -20,8 +20,322 @@ type Cell = {
   s?: CellStyle;
 };
 
+type WorkbookColumnMap = {
+  itemNoCol: number;
+  descriptionCol: number;
+  unitCol: number;
+  qtyCol: number;
+  rateCol: number;
+  amountCol: number;
+  headerRow: number;
+  rateHeader: string | null;
+  amountHeader: string | null;
+  qtyHeader: string | null;
+};
+
+type WorkbookExtractionOptions = {
+  rateColumnHeader?: string | null;
+  amountColumnHeader?: string | null;
+};
+
+type WorkbookRowRecord = {
+  rowNumber: number;
+  description: string;
+  unit: string;
+  context: string;
+  normalizedKey: string;
+};
+
 function cell(v: string | number | null, s?: CellStyle): Cell {
   return { v, t: typeof v === "number" ? "n" : "s", s };
+}
+
+function normalizeText(value: unknown): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function toTrimmed(value: unknown): string {
+  return String(value ?? "").trim();
+}
+
+function parseNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const text = toTrimmed(value).replace(/,/g, "");
+  if (!text) return null;
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function findFirstNonEmptyCell(row: unknown[]): { index: number; value: string } | null {
+  for (let i = 0; i < row.length; i += 1) {
+    const value = toTrimmed(row[i]);
+    if (value) return { index: i, value };
+  }
+  return null;
+}
+
+function nonEmptyValues(row: unknown[]): string[] {
+  return row.map((cell) => toTrimmed(cell)).filter(Boolean);
+}
+
+function isBillMarkerRow(row: unknown[]): boolean {
+  return nonEmptyValues(row).some((value) => /^bill\s*no\.?\s*\d+/i.test(value));
+}
+
+function detectHeaderRow(row: unknown[], rowIndex: number): WorkbookColumnMap | null {
+  const normalized = row.map((cell) => normalizeText(cell));
+
+  const descriptionCol = normalized.findIndex((value) => value === "description");
+  const unitCol = normalized.findIndex((value) => value === "unit");
+  const qtyCol = normalized.findIndex((value) => ["qty", "quantity", "q ty", "quantities"].includes(value));
+  const rateCol = normalized.findIndex((value) => value === "rate" || value === "unit rate" || value === "rate zmw");
+  const amountCol = normalized.findIndex((value) => value === "amount" || value === "total" || value === "amount zmw");
+
+  if (descriptionCol === -1 || unitCol === -1 || qtyCol === -1) return null;
+
+  return {
+    itemNoCol: Math.max(descriptionCol - 1, 0),
+    descriptionCol,
+    unitCol,
+    qtyCol,
+    rateCol,
+    amountCol,
+    headerRow: rowIndex,
+    rateHeader: rateCol >= 0 ? toTrimmed(row[rateCol]) : null,
+    amountHeader: amountCol >= 0 ? toTrimmed(row[amountCol]) : null,
+    qtyHeader: qtyCol >= 0 ? toTrimmed(row[qtyCol]) : null,
+  };
+}
+
+function buildItemKey(sheetName: string, rowNumber: number, billTitle: string, description: string, unit: string): string {
+  return [
+    `sheet:${normalizeText(sheetName) || "sheet"}`,
+    `row:${rowNumber}`,
+    `bill:${normalizeText(billTitle) || "unassigned"}`,
+    `desc:${normalizeText(description) || "blank"}`,
+    `unit:${normalizeText(unit) || "none"}`,
+  ].join("|");
+}
+
+function parseSourceAnchor(sourceAnchor?: string | null): { sheet: string; row: number } | null {
+  if (!sourceAnchor) return null;
+  const match = /^sheet:(.+);row:(\d+)$/i.exec(sourceAnchor.trim());
+  if (!match) return null;
+  return { sheet: match[1], row: Number(match[2]) };
+}
+
+function buildNormalizedRowKey(description: string, unit: string): string {
+  return `${normalizeText(description)}::${normalizeText(unit)}`;
+}
+
+function looksLikeSummaryRow(description: string): boolean {
+  return /total|summary|carried to/i.test(description);
+}
+
+function inferWorkbookMetadata(rows: unknown[][]): Pick<BOQDocument, "project" | "location" | "prepared_by" | "date"> {
+  const defaults = {
+    project: "Uploaded BOQ",
+    location: "Zambia",
+    prepared_by: "BOQ Generator",
+    date: new Date().toISOString().slice(0, 10),
+  };
+
+  for (let i = 0; i < Math.min(rows.length, 15); i += 1) {
+    const values = nonEmptyValues(rows[i]);
+    if (values.length === 0) continue;
+    if (values[0].toUpperCase() === "FOR" && rows[i + 1]) {
+      const nextValues = nonEmptyValues(rows[i + 1]);
+      if (nextValues.length > 0) defaults.project = nextValues[0];
+    }
+    if (values[0].toUpperCase() === "AT" && rows[i + 1]) {
+      const nextValues = nonEmptyValues(rows[i + 1]);
+      if (nextValues.length > 0) defaults.location = nextValues[0];
+    }
+    if (values[0].toUpperCase() === "DATE") {
+      defaults.date = values[1] || values[0] || defaults.date;
+    }
+    if (values[0].toUpperCase() === "PREPARED BY") {
+      defaults.prepared_by = values[1] || defaults.prepared_by;
+    }
+  }
+
+  return defaults;
+}
+
+export function extractWorkbookBOQ(
+  buffer: Buffer,
+  options: WorkbookExtractionOptions = {}
+): BOQDocument {
+  const wb = XLSX.read(buffer, { type: "buffer", cellFormula: true, cellStyles: true });
+  const sheetName = wb.SheetNames[0];
+  if (!sheetName) {
+    return {
+      project: "Uploaded BOQ",
+      location: "Zambia",
+      prepared_by: "BOQ Generator",
+      date: new Date().toISOString().slice(0, 10),
+      bills: [],
+      pipeline_version: "excel-rate-v2.0",
+    };
+  }
+
+  const ws = wb.Sheets[sheetName];
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as unknown[][];
+  const range = XLSX.utils.decode_range(ws["!ref"] ?? "A1");
+  const meta = inferWorkbookMetadata(rows);
+
+  let currentColumns: WorkbookColumnMap | null = null;
+  let currentBillTitle = "Front Matter";
+  let currentBillNumber = 0;
+  let currentSection: string | null = null;
+  let pendingBillTitle = false;
+  let repeatedHeaderCount = 0;
+  let preservedSummaryRows = 0;
+  let mappedItemRows = 0;
+
+  const bills: BOQBill[] = [];
+  const ensureBill = () => {
+    let bill = bills.find((entry) => entry.number === currentBillNumber && entry.title === currentBillTitle);
+    if (!bill) {
+      bill = { number: currentBillNumber, title: currentBillTitle, items: [] };
+      bills.push(bill);
+    }
+    return bill;
+  };
+
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex] ?? [];
+    const header = detectHeaderRow(row, rowIndex);
+    if (header) {
+      currentColumns = header;
+      repeatedHeaderCount += 1;
+      continue;
+    }
+
+    if (isBillMarkerRow(row)) {
+      const values = nonEmptyValues(row);
+      const marker = values.find((value) => /^bill\s*no\.?\s*\d+/i.test(value));
+      const parsedBillNumber = marker ? Number((marker.match(/\d+/) ?? ["0"])[0]) : currentBillNumber + 1;
+      currentBillNumber = Number.isFinite(parsedBillNumber) ? parsedBillNumber : currentBillNumber + 1;
+      currentBillTitle = marker ?? `Bill ${currentBillNumber}`;
+      currentSection = null;
+      pendingBillTitle = true;
+      continue;
+    }
+
+    const firstNonEmpty = findFirstNonEmptyCell(row);
+    if (!firstNonEmpty) continue;
+
+    if (pendingBillTitle) {
+      const values = nonEmptyValues(row);
+      if (values.length === 1 && !/^item$/i.test(values[0]) && !isBillMarkerRow(row)) {
+        currentBillTitle = values[0];
+        pendingBillTitle = false;
+        ensureBill();
+        continue;
+      }
+      pendingBillTitle = false;
+    }
+
+    const columns = currentColumns ?? {
+      itemNoCol: 0,
+      descriptionCol: 1,
+      unitCol: 2,
+      qtyCol: 3,
+      rateCol: 4,
+      amountCol: 5,
+      headerRow: -1,
+      rateHeader: options.rateColumnHeader ?? null,
+      amountHeader: options.amountColumnHeader ?? null,
+      qtyHeader: "QTY",
+    };
+
+    const itemNo = toTrimmed(row[columns.itemNoCol]);
+    const description = toTrimmed(row[columns.descriptionCol] ?? firstNonEmpty.value);
+    const unit = toTrimmed(row[columns.unitCol]);
+    const qty = parseNumber(row[columns.qtyCol]);
+    const rateCell = toTrimmed(row[columns.rateCol]);
+    const amountCell = columns.amountCol >= 0 ? row[columns.amountCol] : null;
+    const amount = parseNumber(amountCell);
+    const rate = /^incl$/i.test(rateCell) ? null : parseNumber(rateCell);
+
+    if (!description || /^item$/i.test(description) || /^description$/i.test(description)) continue;
+
+    const isSummaryRow = looksLikeSummaryRow(description);
+    const isMeasuredRow = Boolean(unit) || qty !== null;
+    const isHeaderRow =
+      !isMeasuredRow &&
+      rate === null &&
+      (amount === null || amount === 0) &&
+      !/^incl$/i.test(rateCell);
+
+    if (!isMeasuredRow && !isHeaderRow && !isSummaryRow && !itemNo) continue;
+
+    if (isHeaderRow && !isSummaryRow) {
+      currentSection = description;
+    }
+
+    const bill = ensureBill();
+    if (isSummaryRow) preservedSummaryRows += 1;
+    if (isMeasuredRow) mappedItemRows += 1;
+
+    const sourceAnchor = `sheet:${sheetName};row:${rowIndex + 1}`;
+    const workbookContext = currentSection ? `${currentBillTitle} > ${currentSection}` : currentBillTitle;
+    const kind =
+      isSummaryRow ? "summary_row" :
+      isHeaderRow ? (currentBillNumber === 0 ? "preamble" : "header") :
+      "measured_item";
+
+    bill.items.push({
+      item_key: buildItemKey(sheetName, rowIndex + 1, currentBillTitle, description, unit),
+      item_no: itemNo,
+      description,
+      unit: unit || "",
+      qty,
+      rate,
+      amount,
+      quantity_source: qty !== null ? "explicit" : undefined,
+      quantity_confidence: qty !== null ? 1 : null,
+      source_anchor: sourceAnchor,
+      source_document: sheetName,
+      evidence_type: "tabulated_scope",
+      is_header: isHeaderRow || isSummaryRow,
+      note: /^incl$/i.test(rateCell) ? "Incl" : undefined,
+      rate_source: rate !== null ? "existing_workbook_rate" : undefined,
+      rate_source_detail: rate !== null ? "Existing rate found in uploaded workbook." : null,
+      rate_confidence: rate !== null ? 1 : null,
+      workbook_row_kind: kind,
+      workbook_context: workbookContext,
+    });
+  }
+
+  const workbookPreservation: BOQWorkbookPreservation = {
+    sheet_name: sheetName,
+    source_row_count: range.e.r + 1,
+    source_col_count: range.e.c + 1,
+    mapped_item_rows: mappedItemRows,
+    repeated_header_count: repeatedHeaderCount,
+    preserved_summary_rows: preservedSummaryRows,
+    ambiguous_item_rows: 0,
+    workbook_local_rate_matches: 0,
+    ai_priced_rows: 0,
+    unresolved_rate_rows: bills.flatMap((bill) => bill.items).filter((item) => !item.is_header && item.rate === null).length,
+    outlier_rate_rows: 0,
+    rate_column_header: currentColumns?.rateHeader ?? options.rateColumnHeader ?? null,
+    amount_column_header: currentColumns?.amountHeader ?? options.amountColumnHeader ?? null,
+    qty_column_header: currentColumns?.qtyHeader ?? null,
+  };
+
+  return {
+    ...meta,
+    bills: bills.filter((bill) => bill.items.length > 0),
+    pipeline_version: "excel-rate-v2.0",
+    workbook_preservation: workbookPreservation,
+  };
 }
 
 const COLORS = {
@@ -519,12 +833,12 @@ export function patchExcelWithRates(
 
   const ws = wb.Sheets[sheetName];
   const range = XLSX.utils.decode_range(ws["!ref"] ?? "A1");
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as unknown[][];
 
   // Find the header row and column indices for Rate, Amount, and QTY
   let headerRow = -1;
   let rateCol = -1;
   let amountCol = -1;
-  let qtyCol = -1;
 
   const rateHeaderNorm = rateColumnHeader.trim().toLowerCase();
   const amountHeaderNorm = amountColumnHeader.trim().toLowerCase();
@@ -540,10 +854,6 @@ export function patchExcelWithRates(
       const text = String(cellVal.v ?? "").trim().toLowerCase();
       if (text === rateHeaderNorm) { rateCol = c; foundRate = true; }
       if (text === amountHeaderNorm) { amountCol = c; foundAmount = true; }
-      // Detect QTY column to use as a row discriminator
-      if (text === "qty" || text === "quantity" || text === "q'ty" || text === "quantities") {
-        qtyCol = c;
-      }
     }
     if (foundRate || foundAmount) { headerRow = r; break; }
   }
@@ -553,45 +863,138 @@ export function patchExcelWithRates(
     return originalBuffer;
   }
 
-  // Collect all non-header BOQ items in order
-  const allItems = boq.bills.flatMap((bill) =>
-    bill.items.filter((item) => !item.is_header)
-  );
+  const allItems = boq.bills.flatMap((bill) => bill.items.filter((item) => !item.is_header));
+  const fallbackRows = new Map<string, WorkbookRowRecord[]>();
+  let currentColumns: WorkbookColumnMap | null = null;
+  let currentBillTitle = "Front Matter";
+  let currentSection: string | null = null;
+  let pendingBillTitle = false;
 
-  // Walk data rows and fill rates by sequential position.
-  // Use the QTY column as the discriminator when available: only rows with a
-  // positive numeric QTY are genuine item rows. This skips preamble text,
-  // bill headers, section headers, and subtotal rows, all of which have no QTY.
-  let itemIndex = 0;
-  for (let r = headerRow + 1; r <= range.e.r && itemIndex < allItems.length; r++) {
-    if (qtyCol !== -1) {
-      // Preferred path: only advance on rows that have a positive numeric QTY
-      const qtyCellRef = XLSX.utils.encode_cell({ r, c: qtyCol });
-      const qtyVal = ws[qtyCellRef]?.v;
-      if (typeof qtyVal !== "number" || qtyVal <= 0) continue;
-    } else {
-      // Fallback: skip fully blank rows (legacy behaviour for simple files)
-      let hasContent = false;
-      for (let c = range.s.c; c <= range.e.c; c++) {
-        const ref = XLSX.utils.encode_cell({ r, c });
-        if (ws[ref]?.v != null && String(ws[ref].v).trim() !== "") { hasContent = true; break; }
-      }
-      if (!hasContent) continue;
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex] ?? [];
+    const detectedHeader = detectHeaderRow(row, rowIndex);
+    if (detectedHeader) {
+      currentColumns = detectedHeader;
+      continue;
     }
 
-    const item = allItems[itemIndex];
-    itemIndex++;
+    if (isBillMarkerRow(row)) {
+      const values = nonEmptyValues(row);
+      const marker = values.find((value) => /^bill\s*no\.?\s*\d+/i.test(value));
+      currentBillTitle = marker ?? currentBillTitle;
+      currentSection = null;
+      pendingBillTitle = true;
+      continue;
+    }
 
-    if (item.is_header) continue;
+    const firstNonEmpty = findFirstNonEmptyCell(row);
+    if (!firstNonEmpty) continue;
 
-    // Write "Incl" as text for items that are absorbed into other rates
+    if (pendingBillTitle) {
+      const values = nonEmptyValues(row);
+      if (values.length === 1 && !/^item$/i.test(values[0])) {
+        currentBillTitle = values[0];
+        pendingBillTitle = false;
+        continue;
+      }
+      pendingBillTitle = false;
+    }
+
+    const columns = currentColumns ?? {
+      itemNoCol: 0,
+      descriptionCol: 1,
+      unitCol: 2,
+      qtyCol: 3,
+      rateCol,
+      amountCol,
+      headerRow,
+      rateHeader: rateColumnHeader,
+      amountHeader: amountColumnHeader,
+      qtyHeader: "QTY",
+    };
+    const description = toTrimmed(row[columns.descriptionCol] ?? firstNonEmpty.value);
+    const unit = toTrimmed(row[columns.unitCol]);
+    const qty = parseNumber(row[columns.qtyCol]);
+    const rateValue = parseNumber(row[columns.rateCol]);
+    const amountValue = columns.amountCol >= 0 ? parseNumber(row[columns.amountCol]) : null;
+    const isSummaryRow = looksLikeSummaryRow(description);
+    const isMeasuredRow = Boolean(unit) || qty !== null;
+    const isHeaderRow =
+      !isMeasuredRow &&
+      rateValue === null &&
+      (amountValue === null || amountValue === 0) &&
+      description.length > 0 &&
+      !isSummaryRow;
+
+    if (!description || /^description$/i.test(description) || /^item$/i.test(description)) continue;
+    if (isHeaderRow) {
+      currentSection = description;
+      continue;
+    }
+    if (!isMeasuredRow) continue;
+
+    const context = currentSection ? `${currentBillTitle} > ${currentSection}` : currentBillTitle;
+    const key = buildNormalizedRowKey(description, unit);
+    const existing = fallbackRows.get(key) ?? [];
+    existing.push({
+      rowNumber: rowIndex + 1,
+      description,
+      unit,
+      context,
+      normalizedKey: key,
+    });
+    fallbackRows.set(key, existing);
+  }
+
+  for (const item of allItems) {
+    let targetRow = parseSourceAnchor(item.source_anchor)?.row ?? null;
+    if (!targetRow) {
+      const key = buildNormalizedRowKey(item.description, item.unit);
+      const candidates = fallbackRows.get(key) ?? [];
+      let narrowed = candidates;
+      if (item.workbook_context) {
+        const targetContext = normalizeText(item.workbook_context);
+        const contextMatches = candidates.filter(
+          (candidate) => normalizeText(candidate.context) === targetContext
+        );
+        if (contextMatches.length > 0) {
+          narrowed = contextMatches;
+        }
+      }
+      if (narrowed.length === 1) {
+        targetRow = narrowed[0].rowNumber;
+      }
+    }
+
+    if (!targetRow) continue;
+    const r = targetRow - 1;
+
     if (item.note && /incl/i.test(item.note)) {
       ws[XLSX.utils.encode_cell({ r, c: rateCol })] = { v: "Incl", t: "s" };
-    } else if (item.rate !== null) {
+      if (amountCol !== -1) {
+        const amountRef = XLSX.utils.encode_cell({ r, c: amountCol });
+        const existingAmountCell = ws[amountRef];
+        if (!existingAmountCell?.f) {
+          ws[amountRef] = { v: "Incl", t: "s" };
+        }
+      }
+      continue;
+    }
+
+    if (item.rate !== null) {
       ws[XLSX.utils.encode_cell({ r, c: rateCol })] = { v: item.rate, t: "n", z: "#,##0.00" };
     }
-    // Amount column is intentionally NOT patched — the original =D*E formula
-    // auto-recalculates when the file is opened, preserving the formula chain.
+
+    if (amountCol !== -1) {
+      const amountRef = XLSX.utils.encode_cell({ r, c: amountCol });
+      const existingAmountCell = ws[amountRef];
+      if (!existingAmountCell?.f) {
+        const amount = computeAmount(item);
+        if (amount !== null) {
+          ws[amountRef] = { v: amount, t: "n", z: "#,##0.00" };
+        }
+      }
+    }
   }
 
   return XLSX.write(wb, { type: "buffer", bookType: "xlsx" });

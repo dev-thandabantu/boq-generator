@@ -58,7 +58,6 @@ export default function BOQPage() {
   const [exporting, setExporting] = useState(false);
   const [exportingPatched, setExportingPatched] = useState(false);
   const [hasSourceExcel, setHasSourceExcel] = useState(false);
-  const [exportDropdownOpen, setExportDropdownOpen] = useState(false);
   const [saved, setSaved] = useState(true);
   const [loading, setLoading] = useState(true);
   const [qa, setQA] = useState<BOQQualityScore | null>(null);
@@ -220,14 +219,18 @@ export default function BOQPage() {
       console.error(e);
     } finally {
       setExporting(false);
-      setExportDropdownOpen(false);
     }
   }
 
   async function handleExportPatched() {
     setExportingPatched(true);
-    setExportDropdownOpen(false);
     try {
+      ph.capture("excel_downloaded", {
+        boq_id: boqId,
+        type: "patched_original",
+        bill_count: boq?.bills.length ?? 0,
+        item_count: boq?.bills.reduce((s, b) => s + b.items.filter((i) => !i.is_header).length, 0) ?? 0,
+      });
       const res = await fetch(`/api/export-patched/${boqId}`);
       if (!res.ok) throw new Error("Export failed");
       const blob = await res.blob();
@@ -403,6 +406,7 @@ export default function BOQPage() {
 
   const qualitySummary = getQualitySummary(boq);
   const hasQuantityIssues = qualitySummary.qty_missing > 0 || qualitySummary.low_confidence > 0;
+  const workbookStats = boq.workbook_preservation;
 
   const grandTotal = boq.bills.reduce((sum, b) => {
     const billTotal = b.items.reduce((s, it) => {
@@ -448,37 +452,13 @@ export default function BOQPage() {
             )}
             {qa && <QABadge qa={qa} />}
             {hasSourceExcel ? (
-              <div className="relative">
-                <button
-                  onClick={() => setExportDropdownOpen((v) => !v)}
-                  disabled={exporting || exportingPatched}
-                  className="px-4 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-black text-sm font-semibold transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
-                >
-                  {exporting || exportingPatched ? "Exporting…" : "Download Excel"}
-                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-                  </svg>
-                </button>
-                {exportDropdownOpen && (
-                  <div className="absolute right-0 top-full mt-1 w-64 rounded-lg border border-white/10 bg-[#1a1a1a] shadow-xl z-50">
-                    <button
-                      onClick={handleExportPatched}
-                      className="w-full px-4 py-3 text-left text-sm text-white hover:bg-white/5 rounded-t-lg"
-                    >
-                      <p className="font-medium">Download original with rates</p>
-                      <p className="text-xs text-gray-400 mt-0.5">Your uploaded Excel file, with rates filled in</p>
-                    </button>
-                    <div className="border-t border-white/5" />
-                    <button
-                      onClick={handleExport}
-                      className="w-full px-4 py-3 text-left text-sm text-white hover:bg-white/5 rounded-b-lg"
-                    >
-                      <p className="font-medium">Download formatted BOQ</p>
-                      <p className="text-xs text-gray-400 mt-0.5">Fresh export in our house style (ZMW)</p>
-                    </button>
-                  </div>
-                )}
-              </div>
+              <button
+                onClick={handleExportPatched}
+                disabled={exportingPatched}
+                className="px-4 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-black text-sm font-semibold transition-colors disabled:opacity-60"
+              >
+                {exportingPatched ? "Exporting…" : "Download Original With Rates"}
+              </button>
             ) : (
               <button
                 onClick={handleExport}
@@ -549,6 +529,37 @@ export default function BOQPage() {
                   {qualitySummary.qty_missing} unresolved quantities, {qualitySummary.low_confidence}{" "}
                   low-confidence items. Export is allowed, but review these lines first.
                 </p>
+              </div>
+            )}
+
+            {hasSourceExcel && workbookStats && (
+              <div className="rounded-xl border border-emerald-400/30 bg-emerald-500/[0.08] p-4 text-sm space-y-2">
+                <div>
+                  <p className="text-emerald-200 font-semibold">Original Workbook Preservation</p>
+                  <p className="text-emerald-50 mt-1">
+                    This BOQ keeps the uploaded Excel workbook intact and fills pricing only where rows can be mapped safely.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2 text-[11px]">
+                  <span className="rounded bg-white/10 px-2 py-1 text-gray-100">
+                    Measurable rows: {qualitySummary.total_items}
+                  </span>
+                  <span className="rounded bg-white/10 px-2 py-1 text-gray-100">
+                    Mapped rows: {qualitySummary.mapped_rows ?? workbookStats.mapped_item_rows}
+                  </span>
+                  <span className="rounded bg-white/10 px-2 py-1 text-gray-100">
+                    Rates filled: {qualitySummary.rate_filled ?? 0}
+                  </span>
+                  <span className="rounded bg-white/10 px-2 py-1 text-gray-100">
+                    Left blank: {qualitySummary.rate_missing ?? 0}
+                  </span>
+                  <span className="rounded bg-white/10 px-2 py-1 text-gray-100">
+                    Ambiguous rows skipped: {qualitySummary.ambiguous_rows ?? 0}
+                  </span>
+                  <span className="rounded bg-white/10 px-2 py-1 text-gray-100">
+                    Outlier AI rates skipped: {qualitySummary.outlier_rows ?? 0}
+                  </span>
+                </div>
               </div>
             )}
 
@@ -659,6 +670,8 @@ function getQualitySummary(boq: BOQDocument): BOQQualitySummary {
   let qtyWithEvidence = 0;
   let qtyMissing = 0;
   let lowConfidence = 0;
+  let rateFilled = 0;
+  let rateMissing = 0;
 
   for (const bill of boq.bills) {
     for (const item of bill.items) {
@@ -669,6 +682,8 @@ function getQualitySummary(boq: BOQDocument): BOQQualitySummary {
         qtyWithEvidence += 1;
       }
       if ((item.quantity_confidence ?? 0.4) < 0.6) lowConfidence += 1;
+      if (item.rate == null) rateMissing += 1;
+      else rateFilled += 1;
     }
   }
 
@@ -677,6 +692,11 @@ function getQualitySummary(boq: BOQDocument): BOQQualitySummary {
     qty_with_evidence: qtyWithEvidence,
     qty_missing: qtyMissing,
     low_confidence: lowConfidence,
+    rate_filled: boq.quality_summary?.rate_filled ?? rateFilled,
+    rate_missing: boq.quality_summary?.rate_missing ?? rateMissing,
+    mapped_rows: boq.quality_summary?.mapped_rows ?? boq.workbook_preservation?.mapped_item_rows,
+    ambiguous_rows: boq.quality_summary?.ambiguous_rows ?? boq.workbook_preservation?.ambiguous_item_rows ?? 0,
+    outlier_rows: boq.quality_summary?.outlier_rows ?? boq.workbook_preservation?.outlier_rate_rows ?? 0,
   };
 }
 

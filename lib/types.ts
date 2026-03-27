@@ -14,6 +14,33 @@ export type BOQEvidenceType =
   | "metadata_only"
   | "missing";
 
+export type BOQRateSourceCategory =
+  | "embedded_market_heuristic"
+  | "workbook_local_pattern"
+  | "project_consistency_inference"
+  | "external_reference_document"
+  | "manual_override"
+  | "existing_workbook_rate";
+
+export type BOQPricingCategory =
+  | "ditto_reference"
+  | "pipe_run"
+  | "pipe_fitting"
+  | "steel_fabrication"
+  | "concrete_structure"
+  | "earthworks"
+  | "finishes"
+  | "doors_windows"
+  | "electrical_fixture"
+  | "treatment_service"
+  | "other";
+
+export type BOQRateSkipReason =
+  | "specialist_item_requires_local_precedent"
+  | "ditto_without_parent"
+  | "ai_outlier_rejected"
+  | "no_safe_rate_reference";
+
 export type RequiredAttachmentType = "boq" | "drawing" | "spec" | "schedule" | "unknown";
 export type SourceBundleStatus =
   | "complete"
@@ -51,6 +78,19 @@ export interface BOQItem {
   derivation_note?: string | null;
   is_header?: boolean;
   note?: string; // "Incl", "Rate only", etc.
+  rate_source?: BOQRateSourceCategory;
+  rate_source_detail?: string | null;
+  rate_confidence?: number | null;
+  pricing_category?: BOQPricingCategory;
+  rate_skip_reason?: BOQRateSkipReason | null;
+  workbook_row_kind?:
+    | "measured_item"
+    | "header"
+    | "summary_row"
+    | "note_row"
+    | "preamble"
+    | "bill_header";
+  workbook_context?: string | null;
 }
 
 export interface BOQBill {
@@ -101,6 +141,78 @@ export interface BOQDocument {
   quality_summary?: BOQQualitySummary;
   artifacts?: BOQArtifacts;
   qa?: BOQQualityScore;
+  rate_reference?: BOQRateReference;
+  workbook_preservation?: BOQWorkbookPreservation;
+}
+
+export interface BOQRateReferenceAssessment {
+  source_name: string;
+  source_path?: string;
+  relevance: "relevant" | "not_relevant" | "unknown";
+  reason: string;
+  effective_for: Array<"construction_boq_generation" | "construction_rate_filling" | "other">;
+}
+
+export interface BOQRateReference {
+  pricing_basis: string;
+  currency: string;
+  version: string;
+  assessed_sources?: BOQRateReferenceAssessment[];
+}
+
+export interface BOQComparisonMatchedItem {
+  key: string;
+  label: string;
+  baseline_rate: number;
+  candidate_rate: number;
+  absolute_delta: number;
+  percent_delta: number | null;
+  within_10pct: boolean;
+  within_20pct: boolean;
+}
+
+export interface BOQComparisonReport {
+  baseline_label: string;
+  candidate_label: string;
+  baseline_total_items: number;
+  candidate_total_items: number;
+  matched_items: number;
+  baseline_priced_items: number;
+  candidate_priced_items: number;
+  comparable_priced_items: number;
+  coverage_ratio: number;
+  within_10pct_ratio: number;
+  within_20pct_ratio: number;
+  mean_absolute_percentage_error: number | null;
+  mean_rate_delta: number | null;
+  median_rate_delta: number | null;
+  section_match_ratio: number;
+  item_match_ratio: number;
+  workbook_fidelity_score: number;
+  pricing_accuracy_score: number;
+  overall_score: number;
+  missing_sections: string[];
+  extra_sections: string[];
+  missing_item_labels: string[];
+  extra_item_labels: string[];
+  sample_matches: BOQComparisonMatchedItem[];
+}
+
+export interface BOQWorkbookPreservation {
+  sheet_name: string;
+  source_row_count: number;
+  source_col_count: number;
+  mapped_item_rows: number;
+  repeated_header_count: number;
+  preserved_summary_rows: number;
+  ambiguous_item_rows?: number;
+  workbook_local_rate_matches?: number;
+  ai_priced_rows?: number;
+  unresolved_rate_rows?: number;
+  outlier_rate_rows?: number;
+  rate_column_header?: string | null;
+  amount_column_header?: string | null;
+  qty_column_header?: string | null;
 }
 
 export interface BOQValidationFlag {
@@ -121,6 +233,11 @@ export interface BOQQualitySummary {
   qty_with_evidence: number;
   qty_missing: number;
   low_confidence: number;
+  rate_filled?: number;
+  rate_missing?: number;
+  mapped_rows?: number;
+  ambiguous_rows?: number;
+  outlier_rows?: number;
   semantic_risk_items?: number;
   evidence_coverage_ratio?: number;
   source_bundle_status?: SourceBundleStatus;

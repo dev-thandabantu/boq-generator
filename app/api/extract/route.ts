@@ -16,6 +16,8 @@ export const maxDuration = 60;
 const MAX_SIZE = 15 * 1024 * 1024; // 15 MB
 const MIN_DIRECT_TEXT_LENGTH = 120;
 const GEMINI_VISION_MODELS = [
+  process.env.GEMINI_SOW_MODEL_FALLBACK,
+  process.env.GEMINI_SOW_MODEL_PRIMARY,
   process.env.GEMINI_MODEL_FALLBACK,
   process.env.GEMINI_MODEL_PRIMARY,
   "gemini-2.5-flash",
