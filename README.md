@@ -168,6 +168,75 @@ Use the printed `whsec_...` value as `STRIPE_WEBHOOK_SECRET` in `.env.local`.
 3. Set `NEXT_PUBLIC_APP_URL` to the correct URL for each environment.
 4. Deploy.
 
+### Recommended branch workflow
+
+Use `master` as the protected release branch and keep `qa` as an automatically synced Preview branch for testers.
+
+- `master` -> Production -> `boq.aakitech.com`
+- `qa` -> Preview / QA -> `boq-generator-qa.aakitech.com`
+- feature branches / PR branches -> normal Vercel preview URLs only
+
+Recommended release flow:
+
+1. Open a PR from your feature branch into `master`
+2. Review and approve the PR
+3. Merge into `master`
+4. Vercel deploys `master` to production
+5. GitHub Actions fast-forwards `qa` to the same commit
+6. Vercel deploys `qa` as Preview to the QA domain for testers
+
+Important:
+
+- `master` stays protected
+- `qa` can stay unprotected because it is only updated automatically from `master`
+- `qa` should not be used for feature development or independent commits
+
+### QA domain setup in Vercel
+
+If you want `boq-generator-qa.aakitech.com` to always show the latest QA build, connect it to a dedicated branch.
+
+In Vercel:
+
+1. Go to `Project -> Settings -> Domains`
+2. Add `boq-generator-qa.aakitech.com`
+3. Choose `Connect to an environment`
+4. Select `Preview`
+5. In the branch selector, choose the `qa` branch
+6. Save
+
+Because `qa` is still a Preview deployment, it will use your Preview environment variables.
+
+### QA environment variables
+
+Because this repo uses shared non-production credentials:
+
+- `Development` and `Preview` should keep using the same non-production Supabase and Stripe test values
+- the `qa` branch automatically uses the Preview environment values in Vercel
+- set Preview `NEXT_PUBLIC_APP_URL=https://boq-generator-qa.aakitech.com`
+
+### Automatic sync from `master` to `qa`
+
+This repo includes a GitHub Actions workflow at `.github/workflows/sync-master-to-qa.yml`.
+
+What it does:
+
+- runs every time code is pushed to `master`
+- verifies that `qa` has not diverged from `master`
+- fast-forwards `qa` to the exact same commit as `master`
+- lets Vercel deploy `qa` as a Preview build for your testers
+
+Important GitHub setup:
+
+1. Create the `qa` branch in GitHub if it does not already exist
+2. Keep `master` protected with your review rules
+3. Leave `qa` unprotected, or at least allow GitHub Actions to push to it
+
+Important workflow rule:
+
+- developers open PRs into `master`
+- testers use `boq-generator-qa.aakitech.com`
+- `qa` is a mirror of `master`, not a staging branch with separate code
+
 ### Stripe webhook
 
 1. In Stripe, add a webhook endpoint.

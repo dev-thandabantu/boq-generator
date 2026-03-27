@@ -1,0 +1,51 @@
+name: Sync Master to QA
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Fast-forward qa to master
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch branches
+        run: |
+          git fetch origin master qa
+
+      - name: Ensure qa is an ancestor of master
+        run: |
+          if ! git merge-base --is-ancestor origin/qa origin/master; then
+            echo "::error::qa has commits that are not in master. Refusing automatic sync."
+            echo "::error::Keep qa as a mirror of master, or sync it manually before retrying."
+            exit 1
+          fi
+
+      - name: Skip when qa already matches master
+        id: compare
+        run: |
+          if [ "$(git rev-parse origin/qa)" = "$(git rev-parse origin/master)" ]; then
+            echo "noop=true" >> "$GITHUB_OUTPUT"
+            echo "qa already matches master"
+          else
+            echo "noop=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fast-forward qa
+        if: steps.compare.outputs.noop == 'false'
+        run: |
+          git push origin origin/master:refs/heads/qa
