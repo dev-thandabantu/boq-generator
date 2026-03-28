@@ -3,9 +3,8 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 
-import type { BOQBill, BOQDocument, BOQItem, BOQQualityScore, BOQQualitySummary } from "@/lib/types";
+import type { BOQBill, BOQDocument, BOQItem, BOQQualitySummary } from "@/lib/types";
 import { usePostHog } from "posthog-js/react";
-import { computeDeterministicQA } from "@/lib/boq-qa";
 
 interface DBBoq {
   id: string;
@@ -37,17 +36,6 @@ function unresolvedPlaceholder(item: BOQItem): string | null {
   return null;
 }
 
-function getSourceUsage(boq: BOQDocument) {
-  const counts = new Map<string, number>();
-  for (const bill of boq.bills) {
-    for (const item of bill.items) {
-      if (item.is_header) continue;
-      const key = item.source_document || "primary-or-unknown";
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-  }
-  return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
-}
 
 export default function BOQPage() {
   const router = useRouter();
@@ -58,10 +46,9 @@ export default function BOQPage() {
   const [exporting, setExporting] = useState(false);
   const [exportingPatched, setExportingPatched] = useState(false);
   const [hasSourceExcel, setHasSourceExcel] = useState(false);
+  const [exportDropdownOpen, setExportDropdownOpen] = useState(false);
   const [saved, setSaved] = useState(true);
   const [loading, setLoading] = useState(true);
-  const [qa, setQA] = useState<BOQQualityScore | null>(null);
-  const [qaLoading, setQALoading] = useState(false);
   const [assistantInput, setAssistantInput] = useState("");
   const [assistantBusy, setAssistantBusy] = useState(false);
   const [assistantPaneOpen, setAssistantPaneOpen] = useState(true);
@@ -89,21 +76,7 @@ export default function BOQPage() {
       const { boq: row }: { boq: DBBoq } = await res.json();
       setBOQ(row.data);
       setHasSourceExcel(Boolean(row.source_excel_key));
-      setQA(row.data.qa ?? computeDeterministicQA(row.data));
       setLoading(false);
-
-      // Load QA score — use cached if present, otherwise fetch
-      if (row.data.qa) {
-        setQA(row.data.qa);
-      } else {
-        setQALoading(true);
-        fetch(`/api/boqs/${id}/qa`, { method: "POST" })
-          .then((r) => (r.ok ? r.json() : null))
-          .then((json) => {
-            if (json?.qa) setQA(json.qa);
-          })
-          .finally(() => setQALoading(false));
-      }
     }
     load();
   }, [id, router]);
@@ -126,7 +99,6 @@ export default function BOQPage() {
   const updateBOQ = useCallback(
     (updated: BOQDocument) => {
       setBOQ(updated);
-      setQA(computeDeterministicQA(updated));
       setSaved(false);
       saveToDB(updated);
     },
@@ -186,14 +158,6 @@ export default function BOQPage() {
   async function handleExport() {
     if (!boq) return;
 
-    const summary = getQualitySummary(boq);
-    if (summary.qty_missing > 0 || summary.low_confidence > 0) {
-      const proceed = window.confirm(
-        `There are ${summary.qty_missing} unresolved quantities and ${summary.low_confidence} low-confidence items. Export anyway?`
-      );
-      if (!proceed) return;
-    }
-
     ph.capture("excel_downloaded", {
       boq_id: boqId,
       bill_count: boq.bills.length,
@@ -224,6 +188,7 @@ export default function BOQPage() {
 
   async function handleExportPatched() {
     setExportingPatched(true);
+    setExportDropdownOpen(false);
     try {
       ph.capture("excel_downloaded", {
         boq_id: boqId,
@@ -430,7 +395,6 @@ export default function BOQPage() {
   if (!boq) return null;
 
   const qualitySummary = getQualitySummary(boq);
-  const hasQuantityIssues = qualitySummary.qty_missing > 0 || qualitySummary.low_confidence > 0;
   const workbookStats = boq.workbook_preservation;
 
   const grandTotal = boq.bills.reduce((sum, b) => {
@@ -469,21 +433,38 @@ export default function BOQPage() {
                 </span>
               </span>
             )}
-            {qaLoading && (
-              <span className="hidden md:flex items-center gap-1.5 text-xs text-gray-200">
-                <span className="w-3 h-3 rounded-full border border-gray-600 border-t-transparent animate-spin inline-block" />
-                Scoring BOQ…
-              </span>
-            )}
-            {qa && <QABadge qa={qa} />}
             {hasSourceExcel ? (
-              <button
-                onClick={handleExportPatched}
-                disabled={exportingPatched}
-                className="px-4 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-black text-sm font-semibold transition-colors disabled:opacity-60"
-              >
-                {exportingPatched ? "Exporting…" : "Download Original With Rates"}
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setExportDropdownOpen((v) => !v)}
+                  disabled={exporting || exportingPatched}
+                  className="px-4 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-black text-sm font-semibold transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
+                >
+                  {exporting || exportingPatched ? "Exporting…" : "Download Excel"}
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                  </svg>
+                </button>
+                {exportDropdownOpen && (
+                  <div className="absolute right-0 top-full mt-1 w-64 rounded-lg border border-white/10 bg-[#1a1a1a] shadow-xl z-50">
+                    <button
+                      onClick={handleExportPatched}
+                      className="w-full px-4 py-3 text-left text-sm text-white hover:bg-white/5 rounded-t-lg"
+                    >
+                      <p className="font-medium">Download original with rates</p>
+                      <p className="text-xs text-gray-400 mt-0.5">Your uploaded Excel file, with rates filled in</p>
+                    </button>
+                    <div className="border-t border-white/5" />
+                    <button
+                      onClick={handleExport}
+                      className="w-full px-4 py-3 text-left text-sm text-white hover:bg-white/5 rounded-b-lg"
+                    >
+                      <p className="font-medium">Download formatted BOQ</p>
+                      <p className="text-xs text-gray-400 mt-0.5">Fresh export in our house style (ZMW)</p>
+                    </button>
+                  </div>
+                )}
+              </div>
             ) : (
               <button
                 onClick={handleExport}
@@ -547,16 +528,6 @@ export default function BOQPage() {
           }`}
         >
           <div className="space-y-6 min-w-0">
-            {hasQuantityIssues && (
-              <div className="rounded-xl border border-amber-400/40 bg-amber-500/12 p-4 text-sm">
-                <p className="text-amber-200 font-semibold">Quantity Issues</p>
-                <p className="text-amber-50 mt-1">
-                  {qualitySummary.qty_missing} unresolved quantities, {qualitySummary.low_confidence}{" "}
-                  low-confidence items. Export is allowed, but review these lines first.
-                </p>
-              </div>
-            )}
-
             {hasSourceExcel && workbookStats && (
               <div className="rounded-xl border border-emerald-400/30 bg-emerald-500/[0.08] p-4 text-sm space-y-2">
                 <div>
@@ -588,36 +559,10 @@ export default function BOQPage() {
               </div>
             )}
 
-            {process.env.NODE_ENV !== "production" && (
-              <div className="rounded-xl border border-sky-400/30 bg-sky-500/[0.08] p-4 text-sm space-y-3">
-                <div>
-                  <p className="text-sky-200 font-semibold">Source Debug</p>
-                  <p className="text-sky-50 mt-1">
-                    Bundle status: {boq.quality_summary?.source_bundle_status ?? boq.document_classification?.source_bundle_status ?? "unknown"}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2 text-[11px]">
-                  {(boq.source_bundle ?? []).map((doc) => (
-                    <span key={doc.document_id} className="rounded bg-white/10 px-2 py-1 text-gray-100">
-                      {doc.document_id} · {doc.role} · {doc.document_type} · {doc.name}
-                    </span>
-                  ))}
-                </div>
-                <div className="space-y-1">
-                  {getSourceUsage(boq).map(([source, count]) => (
-                    <p key={source} className="text-[11px] text-gray-100">
-                      {source}: {count} item{count === 1 ? "" : "s"}
-                    </p>
-                  ))}
-                </div>
-              </div>
-            )}
-
             {boq.bills.map((bill, billIdx) => (
               <BillSection
                 key={billIdx}
                 bill={bill}
-                billIdx={billIdx}
                 onUpdateItem={(itemIdx, field, value) =>
                   updateItem(billIdx, itemIdx, field, value)
                 }
@@ -658,9 +603,9 @@ export default function BOQPage() {
 
         {assistantDrawerOpen && (
           <div className="xl:hidden fixed inset-0 z-40 bg-black/60 backdrop-blur-sm">
-            <div className="absolute inset-y-0 right-0 w-full max-w-md bg-[#13100c] border-l border-amber-400/35 p-3 overflow-y-auto">
+            <div className="absolute inset-y-0 right-0 w-full max-w-md bg-[#111214] border-l border-white/10 p-3 overflow-y-auto">
               <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold text-amber-200">BOQ Assistant</h3>
+                <h3 className="text-sm font-semibold text-white">BOQ Assistant</h3>
                 <button
                   onClick={() => setAssistantDrawerOpen(false)}
                   className="px-2 py-1 rounded-md bg-white/10 text-gray-100 text-xs"
@@ -777,38 +722,31 @@ function AssistantPanel({
   ];
 
   return (
-    <section className="rounded-xl border border-amber-400/35 bg-[#17130e] h-[calc(100dvh-9rem)] max-h-[calc(100dvh-9rem)] min-h-[520px] flex flex-col overflow-hidden">
-      <div className="px-4 py-3 border-b border-amber-400/30 bg-[#1b1711]">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="text-sm font-semibold text-amber-100">AI BOQ Assistant</h2>
-            <p className="text-[11px] text-gray-100 mt-0.5">
-              BOQ-only edits. Generate proposal, review diff, then apply.
-            </p>
-          </div>
-          <button
-            onClick={onUndo}
-            disabled={undoCount === 0 || assistantBusy}
-            className="px-2.5 py-1 rounded-md text-[11px] bg-white/10 hover:bg-white/15 text-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            Undo ({undoCount})
-          </button>
-        </div>
+    <section className="rounded-xl border border-white/10 bg-[#111214] h-[calc(100dvh-9rem)] max-h-[calc(100dvh-9rem)] min-h-[520px] flex flex-col overflow-hidden">
+      <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold text-white">BOQ Assistant</h2>
+        <button
+          onClick={onUndo}
+          disabled={undoCount === 0 || assistantBusy}
+          className="px-2.5 py-1 rounded-md text-[11px] bg-white/[0.08] hover:bg-white/[0.12] text-gray-400 disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          Undo ({undoCount})
+        </button>
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto p-3 flex flex-col gap-3">
         {showWelcome ? (
-          <div className="rounded-lg border border-white/25 bg-white/[0.06] p-3 space-y-3">
-            <p className="text-xs text-white leading-relaxed">
+          <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3 space-y-3">
+            <p className="text-xs text-gray-400 leading-relaxed">
               Tell me what to change in this BOQ and I will generate a safe proposal first.
             </p>
-            <div className={`grid gap-2 transition-opacity ${assistantBusy ? "opacity-40 pointer-events-none" : ""}`}>
+            <div className={`grid gap-1.5 transition-opacity ${assistantBusy ? "opacity-40 pointer-events-none" : ""}`}>
               {quickPrompts.map((prompt) => (
                 <button
                   key={prompt}
                   onClick={() => onPickPrompt(prompt)}
                   disabled={assistantBusy}
-                  className="text-left px-2.5 py-2 rounded-md bg-white/15 hover:bg-white/25 text-[11px] text-white"
+                  className="text-left px-2.5 py-2 rounded-md bg-white/[0.06] hover:bg-white/[0.10] text-[11px] text-gray-300 transition-colors"
                 >
                   {prompt}
                 </button>
@@ -816,35 +754,30 @@ function AssistantPanel({
             </div>
           </div>
         ) : (
-          <div className="flex-1 min-h-[280px] rounded-lg border border-white/20 bg-[#0e0d0a] overflow-hidden">
+          <div className="flex-1 min-h-[280px] rounded-lg border border-white/10 bg-[#0d0e10] overflow-hidden">
             <div ref={threadRef} className="h-full overflow-y-auto p-2.5 space-y-2">
               {assistantMessages.map((message, idx) => (
                 <div
                   key={idx}
                   className={`max-w-[95%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
                     message.role === "user"
-                      ? "ml-auto bg-white/16 text-white border border-white/30"
-                      : "mr-auto bg-amber-500/16 text-amber-50 border border-amber-400/35"
+                      ? "ml-auto bg-white/10 text-white border border-white/15"
+                      : "mr-auto bg-white/[0.04] text-gray-300 border border-white/10"
                   }`}
                 >
-                  <span className="block text-[10px] uppercase tracking-wide opacity-70 mb-1">
-                    {message.role === "user" ? "You" : "Assistant"}
-                  </span>
                   {message.role === "assistant" && !message.content ? (
                     <span className="flex flex-col gap-2">
                       {assistantStatus && (
-                        <span className="text-[11px] text-amber-300/80">{assistantStatus}</span>
+                        <span className="text-[11px] text-gray-500">{assistantStatus}</span>
                       )}
                       <span className="inline-flex gap-1.5 items-center h-5">
-                        <span className="w-2 h-2 rounded-full bg-amber-300/80 animate-bounce" style={{ animationDelay: "0ms" }} />
-                        <span className="w-2 h-2 rounded-full bg-amber-300/80 animate-bounce" style={{ animationDelay: "160ms" }} />
-                        <span className="w-2 h-2 rounded-full bg-amber-300/80 animate-bounce" style={{ animationDelay: "320ms" }} />
+                        <span className="w-2 h-2 rounded-full bg-gray-500 animate-bounce" style={{ animationDelay: "0ms" }} />
+                        <span className="w-2 h-2 rounded-full bg-gray-500 animate-bounce" style={{ animationDelay: "160ms" }} />
+                        <span className="w-2 h-2 rounded-full bg-gray-500 animate-bounce" style={{ animationDelay: "320ms" }} />
                       </span>
                     </span>
                   ) : message.role === "assistant" && assistantBusy && idx === assistantMessages.length - 1 ? (
-                    <span>
-                      <p className="whitespace-pre-wrap break-words">{displayMessage(message.content)}<span className="inline-block w-0.5 h-3.5 bg-amber-300/70 ml-0.5 animate-pulse align-middle" /></p>
-                    </span>
+                    <p className="whitespace-pre-wrap break-words">{displayMessage(message.content)}<span className="inline-block w-0.5 h-3.5 bg-gray-400 ml-0.5 animate-pulse align-middle" /></p>
                   ) : (
                     <p className="whitespace-pre-wrap break-words">{displayMessage(message.content)}</p>
                   )}
@@ -854,36 +787,21 @@ function AssistantPanel({
           </div>
         )}
 
-        {!showWelcome && (
-          <div className={`flex flex-wrap gap-2 transition-opacity ${assistantBusy ? "opacity-40 pointer-events-none" : ""}`}>
-            {quickPrompts.map((prompt) => (
-              <button
-                key={prompt}
-                onClick={() => onPickPrompt(prompt)}
-                disabled={assistantBusy}
-                className="px-2.5 py-1 rounded-md bg-white/15 hover:bg-white/25 text-[11px] text-white"
-              >
-                {prompt}
-              </button>
-            ))}
-          </div>
-        )}
-
         {assistantPreview && (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
-            <p className="text-xs text-amber-100 font-semibold mb-1">Preview ready</p>
-            <p className="text-xs text-white mb-2">{assistantPreview.summary}</p>
-            <div className="flex flex-wrap gap-2 mb-3 text-[11px] text-white">
-              <span className="px-2 py-1 rounded bg-white/15">
+          <div className="rounded-lg border border-white/15 bg-white/[0.04] p-3">
+            <p className="text-xs text-white font-medium mb-1">Proposal ready</p>
+            <p className="text-xs text-gray-400 mb-2">{assistantPreview.summary}</p>
+            <div className="flex flex-wrap gap-2 mb-3 text-[11px] text-gray-400">
+              <span className="px-2 py-1 rounded bg-white/[0.08]">
                 Bills: {assistantPreview.diff.billDelta >= 0 ? "+" : ""}
                 {assistantPreview.diff.billDelta}
               </span>
-              <span className="px-2 py-1 rounded bg-white/15">
+              <span className="px-2 py-1 rounded bg-white/[0.08]">
                 Items: {assistantPreview.diff.itemDelta >= 0 ? "+" : ""}
                 {assistantPreview.diff.itemDelta}
               </span>
-              <span className="px-2 py-1 rounded bg-white/15">
-                Priced items: {assistantPreview.diff.pricedItemsDelta >= 0 ? "+" : ""}
+              <span className="px-2 py-1 rounded bg-white/[0.08]">
+                Priced: {assistantPreview.diff.pricedItemsDelta >= 0 ? "+" : ""}
                 {assistantPreview.diff.pricedItemsDelta}
               </span>
             </div>
@@ -896,7 +814,7 @@ function AssistantPanel({
               </button>
               <button
                 onClick={onDiscardPreview}
-                className="px-3 py-1.5 rounded-md bg-white/15 hover:bg-white/25 text-white text-xs"
+                className="px-3 py-1.5 rounded-md bg-white/[0.08] hover:bg-white/[0.12] text-gray-300 text-xs"
               >
                 Discard
               </button>
@@ -904,11 +822,10 @@ function AssistantPanel({
           </div>
         )}
       </div>
-      <div className="space-y-2 p-3 border-t border-white/20 bg-[#17130e]">
-        <label className="text-[11px] text-gray-100">Instruction</label>
+      <div className="p-3 border-t border-white/10 space-y-2">
         <textarea
           className="boq-cell-editable text-white w-full min-h-[76px]"
-          placeholder="Example: Add a new bill for Drainage Works and include 3 typical items with units and qty 1 where missing."
+          placeholder="Describe the change — e.g. Add a drainage bill with 3 typical items."
           value={assistantInput}
           onChange={(e) => onInputChange(e.target.value)}
           disabled={assistantBusy}
@@ -953,13 +870,11 @@ function MetaField({
 
 function BillSection({
   bill,
-  billIdx,
   onUpdateItem,
   onAddItem,
   onRemoveItem,
 }: {
   bill: BOQBill;
-  billIdx: number;
   onUpdateItem: (itemIdx: number, field: keyof BOQItem, value: string | number | null) => void;
   onAddItem: () => void;
   onRemoveItem: (itemIdx: number) => void;
@@ -1052,19 +967,6 @@ function ItemRow({
 }) {
   const amount = item.amount ?? (item.qty !== null && item.rate !== null ? item.qty * item.rate : null);
   const placeholder = unresolvedPlaceholder(item);
-  const displayNote = item.note && item.note !== "Incl" ? item.note : null;
-  const unresolvedQty = item.qty == null;
-  const lowConfidence = (item.quantity_confidence ?? 0.4) < 0.6;
-  const evidenceLabel =
-    item.evidence_type === "derived_calculation"
-      ? "Derived"
-      : item.evidence_type === "tabulated_scope"
-      ? "Table"
-      : item.evidence_type === "metadata_only"
-      ? "Metadata"
-      : item.evidence_type === "quoted_scope"
-      ? "Quoted"
-      : null;
 
   if (item.is_header) {
     return (
@@ -1082,11 +984,7 @@ function ItemRow({
   }
 
   return (
-    <tr
-      className={`border-b border-white/10 group ${
-        unresolvedQty || lowConfidence ? "bg-amber-500/[0.08] hover:bg-amber-500/[0.13]" : "hover:bg-white/[0.04]"
-      }`}
-    >
+    <tr className="border-b border-white/10 group hover:bg-white/[0.04]">
       <td className="px-3 py-1.5">
         <input
           className="boq-cell-editable text-gray-200 font-mono w-full"
@@ -1101,50 +999,6 @@ function ItemRow({
           rows={item.description.length > 80 ? 2 : 1}
           onChange={(e) => onUpdate("description", e.target.value)}
         />
-        <div className="mt-1 flex flex-wrap gap-1.5">
-          {unresolvedQty && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-400/30 text-amber-100">Missing qty</span>}
-          {lowConfidence && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-400/30 text-orange-100">
-              Low conf {((item.quantity_confidence ?? 0.4) * 100).toFixed(0)}%
-            </span>
-          )}
-          {evidenceLabel && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-400/20 text-sky-100">
-              {evidenceLabel} evidence
-            </span>
-          )}
-          {item.source_anchor && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-gray-100">
-              {item.source_anchor}
-            </span>
-          )}
-          {item.source_document && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-400/20 text-violet-100">
-              {item.source_document}
-            </span>
-          )}
-        </div>
-        {(item.source_excerpt || item.derivation_note || displayNote) && (
-          <div className="mt-1.5 rounded-md border border-white/10 bg-white/[0.03] px-2 py-1.5">
-            {item.source_excerpt && (
-              <p className="text-[10px] text-gray-200 leading-relaxed">
-                {item.source_excerpt.length > 180
-                  ? `${item.source_excerpt.slice(0, 177)}...`
-                  : item.source_excerpt}
-              </p>
-            )}
-            {item.derivation_note && (
-              <p className="text-[10px] text-sky-200 mt-1">
-                Derivation: {item.derivation_note}
-              </p>
-            )}
-            {displayNote && (
-              <p className="text-[10px] text-amber-100 mt-1">
-                Note: {displayNote}
-              </p>
-            )}
-          </div>
-        )}
       </td>
       <td className="px-2 py-1.5 text-center">
         <input
@@ -1194,74 +1048,6 @@ function ItemRow({
         </button>
       </td>
     </tr>
-  );
-}
-
-function QABadge({ qa }: { qa: import("@/lib/types").BOQQualityScore }) {
-  const [open, setOpen] = useState(false);
-  const gradeColour =
-    qa.grade === "Strong"
-      ? "text-green-400 border-green-500/30 bg-green-500/10"
-      : qa.grade === "Good"
-      ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
-      : qa.grade === "Fair"
-      ? "text-yellow-400 border-yellow-500/30 bg-yellow-500/10"
-      : "text-red-400 border-red-500/30 bg-red-500/10";
-
-  return (
-    <div className="relative hidden sm:block">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium ${gradeColour}`}
-      >
-        BOQ Quality: {qa.grade} · {qa.score}/10
-      </button>
-      {open && (
-        <div className="absolute right-0 top-full mt-2 w-72 rounded-xl border border-white/15 bg-[#1a1f28] p-4 shadow-xl z-30 space-y-2">
-          <p className="text-xs font-semibold text-white">{qa.summary}</p>
-          {qa.subscores && (
-            <div className="space-y-2 pt-1">
-              <QASubscoreRow label="Coverage" value={qa.subscores.coverage} />
-              <QASubscoreRow label="Source" value={qa.subscores.source_completeness} />
-              <QASubscoreRow label="Field integrity" value={qa.subscores.field_integrity} />
-              <QASubscoreRow label="Evidence" value={qa.subscores.evidence_traceability} />
-              <QASubscoreRow label="Semantics" value={qa.subscores.boq_semantics} />
-            </div>
-          )}
-          {qa.flags.length > 0 && (
-            <ul className="space-y-1 mt-2">
-              {qa.flags.map((flag, i) => (
-                <li key={i} className="flex items-start gap-2 text-xs text-yellow-300">
-                  <span className="mt-0.5 shrink-0">⚠</span>
-                  {flag}
-                </li>
-              ))}
-            </ul>
-          )}
-          {qa.flags.length === 0 && (
-            <p className="text-xs text-green-400">No issues found.</p>
-          )}
-          <button onClick={() => setOpen(false)} className="text-xs text-gray-200 hover:text-white pt-1">Dismiss</button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function QASubscoreRow({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between text-[11px] text-gray-200">
-        <span>{label}</span>
-        <span className="font-mono text-white">{value.toFixed(1)}/10</span>
-      </div>
-      <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
-        <div
-          className="h-full rounded-full bg-amber-300"
-          style={{ width: `${Math.max(8, Math.min(100, value * 10))}%` }}
-        />
-      </div>
-    </div>
   );
 }
 
