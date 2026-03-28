@@ -563,7 +563,6 @@ export default function BOQPage() {
               <BillSection
                 key={billIdx}
                 bill={bill}
-                billIdx={billIdx}
                 onUpdateItem={(itemIdx, field, value) =>
                   updateItem(billIdx, itemIdx, field, value)
                 }
