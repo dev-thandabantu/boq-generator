@@ -36,17 +36,6 @@ function unresolvedPlaceholder(item: BOQItem): string | null {
   return null;
 }
 
-function getSourceUsage(boq: BOQDocument) {
-  const counts = new Map<string, number>();
-  for (const bill of boq.bills) {
-    for (const item of bill.items) {
-      if (item.is_header) continue;
-      const key = item.source_document || "primary-or-unknown";
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-  }
-  return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
-}
 
 export default function BOQPage() {
   const router = useRouter();
@@ -57,6 +46,7 @@ export default function BOQPage() {
   const [exporting, setExporting] = useState(false);
   const [exportingPatched, setExportingPatched] = useState(false);
   const [hasSourceExcel, setHasSourceExcel] = useState(false);
+  const [exportDropdownOpen, setExportDropdownOpen] = useState(false);
   const [saved, setSaved] = useState(true);
   const [loading, setLoading] = useState(true);
   const [assistantInput, setAssistantInput] = useState("");
@@ -198,6 +188,7 @@ export default function BOQPage() {
 
   async function handleExportPatched() {
     setExportingPatched(true);
+    setExportDropdownOpen(false);
     try {
       ph.capture("excel_downloaded", {
         boq_id: boqId,
@@ -443,13 +434,37 @@ export default function BOQPage() {
               </span>
             )}
             {hasSourceExcel ? (
-              <button
-                onClick={handleExportPatched}
-                disabled={exportingPatched}
-                className="px-4 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-black text-sm font-semibold transition-colors disabled:opacity-60"
-              >
-                {exportingPatched ? "Exporting…" : "Download Original With Rates"}
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setExportDropdownOpen((v) => !v)}
+                  disabled={exporting || exportingPatched}
+                  className="px-4 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-black text-sm font-semibold transition-colors disabled:opacity-60 inline-flex items-center gap-1.5"
+                >
+                  {exporting || exportingPatched ? "Exporting…" : "Download Excel"}
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                  </svg>
+                </button>
+                {exportDropdownOpen && (
+                  <div className="absolute right-0 top-full mt-1 w-64 rounded-lg border border-white/10 bg-[#1a1a1a] shadow-xl z-50">
+                    <button
+                      onClick={handleExportPatched}
+                      className="w-full px-4 py-3 text-left text-sm text-white hover:bg-white/5 rounded-t-lg"
+                    >
+                      <p className="font-medium">Download original with rates</p>
+                      <p className="text-xs text-gray-400 mt-0.5">Your uploaded Excel file, with rates filled in</p>
+                    </button>
+                    <div className="border-t border-white/5" />
+                    <button
+                      onClick={handleExport}
+                      className="w-full px-4 py-3 text-left text-sm text-white hover:bg-white/5 rounded-b-lg"
+                    >
+                      <p className="font-medium">Download formatted BOQ</p>
+                      <p className="text-xs text-gray-400 mt-0.5">Fresh export in our house style (ZMW)</p>
+                    </button>
+                  </div>
+                )}
+              </div>
             ) : (
               <button
                 onClick={handleExport}
@@ -540,31 +555,6 @@ export default function BOQPage() {
                   <span className="rounded bg-white/10 px-2 py-1 text-gray-100">
                     Outlier AI rates skipped: {qualitySummary.outlier_rows ?? 0}
                   </span>
-                </div>
-              </div>
-            )}
-
-            {process.env.NODE_ENV !== "production" && (
-              <div className="rounded-xl border border-sky-400/30 bg-sky-500/[0.08] p-4 text-sm space-y-3">
-                <div>
-                  <p className="text-sky-200 font-semibold">Source Debug</p>
-                  <p className="text-sky-50 mt-1">
-                    Bundle status: {boq.quality_summary?.source_bundle_status ?? boq.document_classification?.source_bundle_status ?? "unknown"}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2 text-[11px]">
-                  {(boq.source_bundle ?? []).map((doc) => (
-                    <span key={doc.document_id} className="rounded bg-white/10 px-2 py-1 text-gray-100">
-                      {doc.document_id} · {doc.role} · {doc.document_type} · {doc.name}
-                    </span>
-                  ))}
-                </div>
-                <div className="space-y-1">
-                  {getSourceUsage(boq).map(([source, count]) => (
-                    <p key={source} className="text-[11px] text-gray-100">
-                      {source}: {count} item{count === 1 ? "" : "s"}
-                    </p>
-                  ))}
                 </div>
               </div>
             )}
@@ -798,21 +788,6 @@ function AssistantPanel({
           </div>
         )}
 
-        {!showWelcome && (
-          <div className={`flex flex-wrap gap-1.5 transition-opacity ${assistantBusy ? "opacity-40 pointer-events-none" : ""}`}>
-            {quickPrompts.map((prompt) => (
-              <button
-                key={prompt}
-                onClick={() => onPickPrompt(prompt)}
-                disabled={assistantBusy}
-                className="px-2.5 py-1 rounded-md bg-white/[0.06] hover:bg-white/[0.10] text-[11px] text-gray-400 transition-colors"
-              >
-                {prompt}
-              </button>
-            ))}
-          </div>
-        )}
-
         {assistantPreview && (
           <div className="rounded-lg border border-white/15 bg-white/[0.04] p-3">
             <p className="text-xs text-white font-medium mb-1">Proposal ready</p>
@@ -896,13 +871,11 @@ function MetaField({
 
 function BillSection({
   bill,
-  billIdx,
   onUpdateItem,
   onAddItem,
   onRemoveItem,
 }: {
   bill: BOQBill;
-  billIdx: number;
   onUpdateItem: (itemIdx: number, field: keyof BOQItem, value: string | number | null) => void;
   onAddItem: () => void;
   onRemoveItem: (itemIdx: number) => void;
