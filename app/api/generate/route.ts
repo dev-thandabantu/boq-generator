@@ -5,9 +5,19 @@ import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { logger } from "@/lib/logger";
 import { trackEvent } from "@/lib/analytics";
 import { computePricing, loadTiers } from "@/lib/pricing";
+import type { PostgrestError } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
+
+function isPostgrestError(error: unknown): error is PostgrestError {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      "message" in error &&
+      typeof (error as { message?: unknown }).message === "string"
+  );
+}
 
 function classifyGenerateError(message: string): { status: number; safeMessage: string } {
   const lower = message.toLowerCase();
@@ -147,7 +157,15 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (dbError) {
-      logger.error("Failed to save preview BOQ to DB", { error: String(dbError), route: "generate" });
+      logger.error("Failed to save preview BOQ to DB", {
+        error: String(dbError),
+        code: isPostgrestError(dbError) ? dbError.code : undefined,
+        message: isPostgrestError(dbError) ? dbError.message : undefined,
+        details: isPostgrestError(dbError) ? dbError.details : undefined,
+        hint: isPostgrestError(dbError) ? dbError.hint : undefined,
+        hasServiceRole,
+        route: "generate",
+      });
       return NextResponse.json(
         { error: "Failed to save BOQ. Please try again." },
         { status: 500 }

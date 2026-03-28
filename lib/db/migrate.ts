@@ -1,4 +1,4 @@
-import { readFileSync } from "fs";
+import { readdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { logger } from "@/lib/logger";
 
@@ -15,12 +15,17 @@ export async function runMigrations() {
       connectionTimeoutMillis: 8000,
     });
     try {
-      const sql = readFileSync(
-        join(process.cwd(), "supabase/migrations/001_initial.sql"),
-        "utf8"
-      );
-      await pool.query(sql);
-      logger.info("DB schema up to date");
+      const migrationsDir = join(process.cwd(), "supabase/migrations");
+      const migrationFiles = readdirSync(migrationsDir)
+        .filter((file) => file.endsWith(".sql"))
+        .sort();
+
+      for (const file of migrationFiles) {
+        const sql = readFileSync(join(migrationsDir, file), "utf8");
+        await pool.query(sql);
+      }
+
+      logger.info("DB schema up to date", { migrationsApplied: migrationFiles });
     } finally {
       await pool.end();
     }
