@@ -10,7 +10,7 @@ AI-powered Bill of Quantities generator for construction projects in Southern Af
 - **Rate-source traceability** — rated BOQs now record the pricing basis used, plus packaged reference documents that were assessed and excluded
 - **BOQ comparison API** — compare an AI-rated BOQ against a human-priced BOQ to track coverage and pricing accuracy
 - **Dynamic pricing checkout** — generation is priced by BOQ size; existing-BOQ rating is priced by item count
-- **Stripe payment gate** — $100 per generation or rating; no account needed to pay
+- **Stripe payment gate** — generation priced by BOQ size (ZMW range); rating priced by item count ($30–$200); no account needed to pay
 - **Google OAuth auth** — sign in to save and revisit past BOQs
 - **BOQ editor** — edit rates in-browser; amounts auto-calculate; changes auto-save
 - **AI edit assistant** — natural-language instructions to add/remove/edit BOQ items via streaming assistant
