@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { generateBOQ, validateSOW } from "@/lib/claude";
 import type { GenerationInputDocument } from "@/lib/claude";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
+import { ensureProfileExists } from "@/lib/supabase/ensure-profile";
 import { logger } from "@/lib/logger";
 import { trackEvent } from "@/lib/analytics";
 import { computePricing, loadTiers } from "@/lib/pricing";
@@ -142,6 +143,16 @@ export async function POST(req: NextRequest) {
       logger.warn("SUPABASE_SERVICE_ROLE_KEY not set; falling back to user-scoped inserts", { route: "generate" });
     }
     const dbClient = hasServiceRole ? createServiceClient() : supabase;
+    if (hasServiceRole) {
+      const { error: profileError } = await ensureProfileExists(dbClient, user);
+      if (profileError) {
+        logger.error("Failed to ensure profile before preview BOQ save", {
+          error: String(profileError),
+          hasServiceRole,
+          route: "generate",
+        });
+      }
+    }
 
     // Save BOQ as a preview (unpaid) — no stripe_session_id yet
     const { data: saved, error: dbError } = await dbClient

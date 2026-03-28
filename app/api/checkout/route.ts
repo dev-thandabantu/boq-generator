@@ -2,6 +2,7 @@ import { logger } from "@/lib/logger";
 import { NextRequest, NextResponse } from "next/server";
 import { getStripe } from "@/lib/stripe";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
+import { ensureProfileExists } from "@/lib/supabase/ensure-profile";
 import { getTierForAmount, getTierForItemCount, loadTiers, loadRateTiers } from "@/lib/pricing";
 
 export const runtime = "nodejs";
@@ -33,6 +34,7 @@ export async function POST(req: NextRequest) {
 
     const isRateBoq = type === "rate_boq";
     const serviceClient = createServiceClient();
+    await ensureProfileExists(serviceClient, user);
 
     let amountCents: number;
     const metadata: Record<string, string> = { user_id: user.id, type };

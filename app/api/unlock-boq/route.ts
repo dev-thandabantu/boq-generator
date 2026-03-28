@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getStripe } from "@/lib/stripe";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
+import { ensureProfileExists } from "@/lib/supabase/ensure-profile";
 import { logger } from "@/lib/logger";
 import { trackEvent } from "@/lib/analytics";
 
@@ -36,6 +37,7 @@ export async function POST(req: NextRequest) {
     }
 
     const serviceClient = createServiceClient();
+    await ensureProfileExists(serviceClient, user);
 
     // Fetch the BOQ — also update payment_status if webhook hasn't fired yet
     const { data: boqRow, error: fetchError } = await serviceClient

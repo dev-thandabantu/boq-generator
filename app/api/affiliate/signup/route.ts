@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
+import { ensureProfileExists } from "@/lib/supabase/ensure-profile";
 import { logger } from "@/lib/logger";
 import { trackEvent } from "@/lib/analytics";
 import { randomBytes } from "crypto";
@@ -30,6 +31,7 @@ export async function POST(req: NextRequest) {
     }
 
     const serviceClient = createServiceClient();
+    await ensureProfileExists(serviceClient, user);
 
     // Check not already an affiliate
     const { data: existing } = await serviceClient
