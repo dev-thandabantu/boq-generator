@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
+import { ensureProfileExists } from "@/lib/supabase/ensure-profile";
 import { extractWorkbookBOQ } from "@/lib/excel";
 import { randomUUID } from "crypto";
 import { logger } from "@/lib/logger";
@@ -77,6 +78,7 @@ export async function POST(req: NextRequest) {
 
     // Upload original Excel to Supabase Storage using service role client (no RLS on bucket)
     const serviceClient = createServiceClient();
+    await ensureProfileExists(serviceClient, user);
     const storageKey = `pending/${randomUUID()}.xlsx`;
 
     const { error: uploadError } = await serviceClient.storage

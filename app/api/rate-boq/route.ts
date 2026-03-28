@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
+import { ensureProfileExists } from "@/lib/supabase/ensure-profile";
 import { getStripe } from "@/lib/stripe";
 import { fillMissingRatesInExistingBOQ, RateContext } from "@/lib/claude";
 import { extractWorkbookBOQ } from "@/lib/excel";
@@ -86,6 +87,7 @@ export async function POST(req: NextRequest) {
     }
 
     const serviceClient = createServiceClient();
+    await ensureProfileExists(serviceClient, user);
 
     // Idempotency: if this Stripe session already produced a paid BOQ, return it
     const { data: existingBoq } = await serviceClient
