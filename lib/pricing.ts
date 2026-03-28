@@ -28,9 +28,10 @@ export interface RateBOQTier {
 }
 
 export const DEFAULT_RATE_TIERS: RateBOQTier[] = [
-  { label: "Small",  maxItems: 50,   usdCents: 2000,  displayUsd: "$20"  },
-  { label: "Medium", maxItems: 200,  usdCents: 5000,  displayUsd: "$50"  },
-  { label: "Large",  maxItems: null, usdCents: 10000, displayUsd: "$100" },
+  { label: "Small",  maxItems: 50,   usdCents: 3000,  displayUsd: "$30"  },
+  { label: "Medium", maxItems: 150,  usdCents: 6000,  displayUsd: "$60"  },
+  { label: "Large",  maxItems: 500,  usdCents: 8000,  displayUsd: "$80"  },
+  { label: "Major",  maxItems: null, usdCents: 20000, displayUsd: "$200" },
 ];
 
 // ─── Pricing result returned to the frontend ──────────────────────────────────
