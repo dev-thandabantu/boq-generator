@@ -60,7 +60,7 @@ export default function LandingPage() {
               </a>
             </div>
             <p className="text-xs text-gray-600 pt-1">
-              One-time payment · Instant delivery · Secure checkout via Stripe
+              One-time payment · Instant delivery · Secure checkout
             </p>
           </div>
         </section>
@@ -78,7 +78,7 @@ export default function LandingPage() {
               {
                 step: "02",
                 title: "Pay once",
-                desc: "Fee is based on your project size — from $20 to $500. Secure checkout via Stripe. No subscription, no hidden costs.",
+                desc: "Fee is based on your project size — from $20 to $500. Secure checkout with card-ready provider routing. No subscription, no hidden costs.",
               },
               {
                 step: "03",

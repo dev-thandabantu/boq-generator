@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { ensureProfileExists } from "@/lib/supabase/ensure-profile";
-import { getStripe } from "@/lib/stripe";
 import { fillMissingRatesInExistingBOQ, RateContext } from "@/lib/claude";
 import { extractWorkbookBOQ } from "@/lib/excel";
 import { logger } from "@/lib/logger";
 import { trackEvent } from "@/lib/analytics";
 import type { PostgrestError } from "@supabase/supabase-js";
+import { assertPaymentMatchesExpected, loadExpectedPayment, persistCompletedPayment, verifyPayment } from "@/lib/payments";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -24,7 +24,12 @@ function isDuplicateStripeSessionError(error: PostgrestError | null): boolean {
   const haystack = [error.message, error.details, error.hint, error.code].filter(Boolean).join(" ").toLowerCase();
   return (
     error.code === "23505" &&
-    (haystack.includes("stripe_session_id") || haystack.includes("boqs_stripe_session_id_key"))
+    (
+      haystack.includes("stripe_session_id") ||
+      haystack.includes("boqs_stripe_session_id_key") ||
+      haystack.includes("payment_reference") ||
+      haystack.includes("boqs_payment_reference_key")
+    )
   );
 }
 
@@ -50,33 +55,14 @@ function classifyError(message: string): { status: number; safeMessage: string }
 
 export async function POST(req: NextRequest) {
   try {
-    const { session_id, rate_context } = (await req.json()) as {
+    const { session_id, transaction_id, rate_context } = (await req.json()) as {
       session_id: string;
+      transaction_id?: string;
       rate_context?: RateContext;
     };
 
     if (!session_id) {
       return NextResponse.json({ error: "Payment required" }, { status: 402 });
-    }
-
-    // Verify Stripe payment
-    const stripeSession = await getStripe().checkout.sessions.retrieve(session_id);
-    if (stripeSession.payment_status !== "paid") {
-      return NextResponse.json({ error: "Payment not completed" }, { status: 402 });
-    }
-
-    const metadata = stripeSession.metadata ?? {};
-    if (metadata.type !== "rate_boq") {
-      return NextResponse.json({ error: "Invalid session type" }, { status: 400 });
-    }
-
-    const storageKey = metadata.storage_key;
-    const rateColHeader = metadata.rate_col_header ?? "";
-    const amountColHeader = metadata.amount_col_header ?? "";
-    const boqId = metadata.boq_id ?? null;
-
-    if (!storageKey) {
-      return NextResponse.json({ error: "Missing storage key in payment session" }, { status: 400 });
     }
 
     // Auth check
@@ -86,6 +72,38 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    const expectedPayment = await loadExpectedPayment(session_id);
+    if (expectedPayment.userId && expectedPayment.userId !== user.id) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
+    const payment = await verifyPayment(session_id, transaction_id);
+    if (!payment.paid) {
+      return NextResponse.json({ error: "Payment not completed" }, { status: 402 });
+    }
+
+    assertPaymentMatchesExpected(payment, expectedPayment);
+
+    logger.info("Rate payment verified", {
+      paymentReference: payment.reference,
+      transactionId: payment.processorReference,
+      route: "rate-boq",
+    });
+
+    const metadata = payment.metadata;
+    if (metadata.type !== "rate_boq") {
+      return NextResponse.json({ error: "Invalid session type" }, { status: 400 });
+    }
+
+    const storageKey = metadata.storage_key;
+    const rateColHeader = metadata.rate_col_header ?? "";
+    const amountColHeader = metadata.amount_col_header ?? "";
+    const boqId = metadata.boq_id ?? expectedPayment.boqId ?? null;
+
+    if (!storageKey) {
+      return NextResponse.json({ error: "Missing storage key in payment session" }, { status: 400 });
+    }
+
     const serviceClient = createServiceClient();
     await ensureProfileExists(serviceClient, user);
 
@@ -93,7 +111,7 @@ export async function POST(req: NextRequest) {
     const { data: existingBoq } = await serviceClient
       .from("boqs")
       .select("id, data")
-      .eq("stripe_session_id", session_id)
+      .eq("payment_reference", session_id)
       .maybeSingle();
 
     if (existingBoq) {
@@ -134,7 +152,9 @@ export async function POST(req: NextRequest) {
         .update({
           title,
           data: boq,
-          stripe_session_id: session_id,
+          payment_provider: payment.provider,
+          payment_reference: session_id,
+          ...(payment.provider === "stripe" ? { stripe_session_id: session_id } : {}),
           source_excel_key: storageKey,
           payment_status: "paid",
           rate_col_header: rateColHeader || null,
@@ -158,7 +178,9 @@ export async function POST(req: NextRequest) {
           user_id: user.id,
           title,
           data: boq,
-          stripe_session_id: session_id,
+          payment_provider: payment.provider,
+          payment_reference: session_id,
+          ...(payment.provider === "stripe" ? { stripe_session_id: session_id } : {}),
           source_excel_key: storageKey,
           rate_col_header: rateColHeader || null,
           amount_col_header: amountColHeader || null,
@@ -182,7 +204,9 @@ export async function POST(req: NextRequest) {
             user_id: user.id,
             title,
             data: boq,
-            stripe_session_id: session_id,
+            payment_provider: payment.provider,
+            payment_reference: session_id,
+            ...(payment.provider === "stripe" ? { stripe_session_id: session_id } : {}),
             payment_status: "paid",
           })
           .select("id")
@@ -201,7 +225,7 @@ export async function POST(req: NextRequest) {
           const { data: concurrentBoq } = await serviceClient
             .from("boqs")
             .select("id, data")
-            .eq("stripe_session_id", session_id)
+            .eq("payment_reference", session_id)
             .maybeSingle();
 
           if (concurrentBoq?.id) {
@@ -229,18 +253,16 @@ export async function POST(req: NextRequest) {
     }
 
     // Record payment
-    await serviceClient.from("payments").upsert(
-      {
-        stripe_session_id: session_id,
-        stripe_payment_intent: stripeSession.payment_intent as string | null,
-        user_id: user.id,
-        amount_cents: stripeSession.amount_total ?? 2000,
-        currency: stripeSession.currency ?? "usd",
-        status: "completed",
-        boq_id: savedId,
-      },
-      { onConflict: "stripe_session_id", ignoreDuplicates: false }
-    );
+    await persistCompletedPayment({
+      provider: payment.provider,
+      reference: payment.reference,
+      processorReference: payment.processorReference,
+      userId: user.id,
+      boqId: savedId,
+      amountCents: payment.amountCents,
+      currency: payment.currency,
+      metadata: payment.metadata,
+    });
 
     trackEvent(user.id, "boq_rated", { boqId: savedId, itemCount, storageKey });
     return NextResponse.json({ boq, boq_id: savedId });

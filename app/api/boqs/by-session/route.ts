@@ -22,7 +22,7 @@ export async function GET(req: NextRequest) {
     .from("boqs")
     .select("id")
     .eq("user_id", user.id)
-    .eq("stripe_session_id", sessionId)
+    .eq("payment_reference", sessionId)
     .maybeSingle();
 
   if (error) {

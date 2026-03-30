@@ -98,7 +98,7 @@ export default function BOQPricingCard({ boqPreview, onUnlock, paying }: BOQPric
         )}
       </button>
 
-      <p className="text-xs text-gray-600">Secure payment via Stripe. You will be redirected back after payment.</p>
+      <p className="text-xs text-gray-600">Secure payment. You will be redirected back after payment.</p>
     </div>
   );
 }
