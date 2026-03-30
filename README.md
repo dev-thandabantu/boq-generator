@@ -10,7 +10,7 @@ AI-powered Bill of Quantities generator for construction projects in Southern Af
 - **Rate-source traceability** — rated BOQs now record the pricing basis used, plus packaged reference documents that were assessed and excluded
 - **BOQ comparison API** — compare an AI-rated BOQ against a human-priced BOQ to track coverage and pricing accuracy
 - **Dynamic pricing checkout** — generation is priced by BOQ size; existing-BOQ rating is priced by item count
-- **Payment gate** — Flutterwave-first across development, preview, and production
+- **Payment gate** — Flutterwave-first across development, preview, and production, Stripe as fallback
 - **Google OAuth auth** — sign in to save and revisit past BOQs
 - **BOQ editor** — edit rates in-browser; amounts auto-calculate; changes auto-save
 - **AI edit assistant** — natural-language instructions to add/remove/edit BOQ items via streaming assistant
@@ -72,24 +72,23 @@ STRIPE_WEBHOOK_SECRET=whsec_...
 
 # Gemini
 GEMINI_API_KEY=<your-google-ai-key>
-GEMINI_MODEL_PRIMARY=gemini-2.5-flash
+GEMINI_MODEL_PRIMARY=gemini-2.5-pro
 GEMINI_MODEL_FALLBACK=gemini-2.5-flash
 
 # Optional workflow-specific Gemini overrides
-# Development and Preview: keep all Gemini workflows on Flash-only while payment flows are being tested
+# Existing BOQ rating: prefer speed and structured output stability
 GEMINI_RATE_MODEL_PRIMARY=gemini-2.5-flash
-GEMINI_RATE_MODEL_FALLBACK=gemini-2.5-flash
+GEMINI_RATE_MODEL_FALLBACK=gemini-2.5-pro
 
-# SOW generation / extraction
-GEMINI_SOW_MODEL_PRIMARY=gemini-2.5-flash
+# SOW generation / extraction: prefer stronger reasoning
+GEMINI_SOW_MODEL_PRIMARY=gemini-2.5-pro
 GEMINI_SOW_MODEL_FALLBACK=gemini-2.5-flash
 
 # Resend
 RESEND_API_KEY=<your-resend-key>
 
 # App URL (no trailing slash)
-# Flutterwave needs a public HTTPS URL for redirects. In local payment testing, use your tunnel URL here.
-NEXT_PUBLIC_APP_URL=https://your-app.vercel.app
+NEXT_PUBLIC_BASE_URL=https://your-app.vercel.app   # or http://localhost:3000 locally
 
 # Supabase Storage bucket for uploaded Excel files
 SUPABASE_STORAGE_BUCKET=boq-generator-dev
@@ -129,7 +128,7 @@ Set the following in `Vercel -> Settings -> Environment Variables`:
 | `FLUTTERWAVE_CURRENCY` | `USD` | `USD` | `USD` or `ZMW` |
 | `STRIPE_SECRET_KEY` | optional | optional | optional |
 | `STRIPE_WEBHOOK_SECRET` | optional | optional | optional |
-| `NEXT_PUBLIC_APP_URL` | public tunnel URL | preview deployment URL | production domain |
+| `NEXT_PUBLIC_APP_URL` | `http://localhost:3000` | preview deployment URL | production domain |
 | `GEMINI_API_KEY` | shared value | shared value | shared value or production-only |
 | `RESEND_API_KEY` | shared value | shared value | shared value or production-only |
 | `NEXT_PUBLIC_POSTHOG_KEY` | shared value | shared value | shared value or production-only |
@@ -176,23 +175,15 @@ In your Supabase project:
 npm run dev
 ```
 
-Open your local app normally for non-payment work.
+Open `http://localhost:3000`.
 
-For local Flutterwave payment testing:
-
-1. Start the app locally with `npm run dev`
-2. Start a public tunnel such as `ngrok http 3000` or `cloudflared tunnel --url http://localhost:3000`
-3. Set `NEXT_PUBLIC_APP_URL` to the tunnel HTTPS URL
-4. Open the app through that tunnel URL, not `localhost`
-5. Point Flutterwave test webhooks to `https://<your-tunnel>/api/webhooks/flutterwave`
-
-If `NEXT_PUBLIC_APP_URL` is still `localhost`, checkout will fail fast with a setup error because Flutterwave redirects will not work reliably against localhost.
+For local Flutterwave testing, use your Flutterwave test secret key and point the Flutterwave test webhook to your local tunnel URL for `/api/webhooks/flutterwave`.
 
 ## Deploying to Vercel
 
 1. Push to GitHub and import the repo in [Vercel](https://vercel.com/new)
 2. Add all environment variables to Vercel → **Settings → Environment Variables**
-3. Set `NEXT_PUBLIC_APP_URL` to your actual public Vercel URL
+3. Set `NEXT_PUBLIC_APP_URL` to your actual Vercel URL
 4. Deploy — migrations run automatically on first cold-start
 
 ### Flutterwave webhook (production)
