@@ -204,7 +204,7 @@ Recommended names:
 
 Create the bucket in Supabase Storage with private access.
 
-## Project structure
+## Project structures
 
 ```text
 app/
