@@ -10,7 +10,7 @@ AI-powered Bill of Quantities generator for construction projects in Southern Af
 - **Rate-source traceability** — rated BOQs now record the pricing basis used, plus packaged reference documents that were assessed and excluded
 - **BOQ comparison API** — compare an AI-rated BOQ against a human-priced BOQ to track coverage and pricing accuracy
 - **Dynamic pricing checkout** — generation is priced by BOQ size; existing-BOQ rating is priced by item count
-- **Stripe payment gate** — $100 per generation or rating; no account needed to pay
+- **Payment gate** — Flutterwave-first across development, preview, and production
 - **Google OAuth auth** — sign in to save and revisit past BOQs
 - **BOQ editor** — edit rates in-browser; amounts auto-calculate; changes auto-save
 - **AI edit assistant** — natural-language instructions to add/remove/edit BOQ items via streaming assistant
@@ -26,7 +26,7 @@ AI-powered Bill of Quantities generator for construction projects in Southern Af
 | Language | TypeScript |
 | Auth + DB | Supabase (Postgres + Row Level Security) |
 | AI | Google Gemini with workflow-specific model routing (Flash-first for BOQ rating, Pro-first for SOW generation) |
-| Payments | Stripe Checkout |
+| Payments | Flutterwave (default) with optional Stripe fallback |
 | Deployment | Vercel |
 | Styling | Tailwind CSS |
 | Analytics | PostHog |
@@ -57,29 +57,39 @@ DATABASE_DIRECT_URL=postgresql://postgres:<password>@db.<project>.supabase.co:54
 DATABASE_POOLER_URL=postgresql://postgres.<project>:<password>@<pooler-host>:5432/postgres
 SUPABASE_STORAGE_BUCKET=boq-generator-dev
 
-# Stripe
-STRIPE_SECRET_KEY=sk_live_...          # or sk_test_... for local dev / preview
-STRIPE_WEBHOOK_SECRET=whsec_...        # from Stripe dashboard -> Webhooks
+# Payment provider
+PAYMENT_PROVIDER=flutterwave          # default everywhere; override only if needed
+
+# Flutterwave
+FLUTTERWAVE_SECRET_KEY=FLWSECK_TEST-...          # use live secret in production
+FLUTTERWAVE_WEBHOOK_SECRET_HASH=<secret-hash>    # optional but strongly recommended
+FLUTTERWAVE_PAYMENT_OPTIONS=card                 # e.g. card or card,mobilemoneyzambia
+FLUTTERWAVE_CURRENCY=USD                         # switch to ZMW if your live setup requires it
+
+# Optional Stripe fallback
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
 
 # Gemini
 GEMINI_API_KEY=<your-google-ai-key>
-GEMINI_MODEL_PRIMARY=gemini-2.5-pro
+GEMINI_MODEL_PRIMARY=gemini-2.5-flash
 GEMINI_MODEL_FALLBACK=gemini-2.5-flash
 
 # Optional workflow-specific Gemini overrides
-# Existing BOQ rating: prefer speed and structured output stability
+# Development and Preview: keep all Gemini workflows on Flash-only while payment flows are being tested
 GEMINI_RATE_MODEL_PRIMARY=gemini-2.5-flash
-GEMINI_RATE_MODEL_FALLBACK=gemini-2.5-pro
+GEMINI_RATE_MODEL_FALLBACK=gemini-2.5-flash
 
-# SOW generation / extraction: prefer stronger reasoning
-GEMINI_SOW_MODEL_PRIMARY=gemini-2.5-pro
+# SOW generation / extraction
+GEMINI_SOW_MODEL_PRIMARY=gemini-2.5-flash
 GEMINI_SOW_MODEL_FALLBACK=gemini-2.5-flash
 
 # Resend
 RESEND_API_KEY=<your-resend-key>
 
 # App URL (no trailing slash)
-NEXT_PUBLIC_BASE_URL=https://your-app.vercel.app   # or http://localhost:3000 locally
+# Flutterwave needs a public HTTPS URL for redirects. In local payment testing, use your tunnel URL here.
+NEXT_PUBLIC_APP_URL=https://your-app.vercel.app
 
 # Supabase Storage bucket for uploaded Excel files
 SUPABASE_STORAGE_BUCKET=boq-generator-dev
@@ -112,9 +122,14 @@ Set the following in `Vercel -> Settings -> Environment Variables`:
 | `DATABASE_DIRECT_URL` | preview/dev value | preview/dev value | production value |
 | `DATABASE_POOLER_URL` | preview/dev value | preview/dev value | production value |
 | `SUPABASE_STORAGE_BUCKET` | shared preview/dev bucket | shared preview/dev bucket | production bucket |
-| `STRIPE_SECRET_KEY` | test key | test key | live key |
-| `STRIPE_WEBHOOK_SECRET` | local Stripe CLI secret | preview Stripe test secret | production Stripe webhook secret |
-| `NEXT_PUBLIC_APP_URL` | `http://localhost:3000` | preview deployment URL | production domain |
+| `PAYMENT_PROVIDER` | `flutterwave` | `flutterwave` | `flutterwave` |
+| `FLUTTERWAVE_SECRET_KEY` | test secret key | test secret key | live secret key |
+| `FLUTTERWAVE_WEBHOOK_SECRET_HASH` | test webhook secret hash | preview/test webhook secret hash | production webhook secret hash |
+| `FLUTTERWAVE_PAYMENT_OPTIONS` | `card` | `card` | `card` or `card,mobilemoneyzambia` |
+| `FLUTTERWAVE_CURRENCY` | `USD` | `USD` | `USD` or `ZMW` |
+| `STRIPE_SECRET_KEY` | optional | optional | optional |
+| `STRIPE_WEBHOOK_SECRET` | optional | optional | optional |
+| `NEXT_PUBLIC_APP_URL` | public tunnel URL | preview deployment URL | production domain |
 | `GEMINI_API_KEY` | shared value | shared value | shared value or production-only |
 | `RESEND_API_KEY` | shared value | shared value | shared value or production-only |
 | `NEXT_PUBLIC_POSTHOG_KEY` | shared value | shared value | shared value or production-only |
@@ -126,8 +141,8 @@ Set the following in `Vercel -> Settings -> Environment Variables`:
 
 Recommended grouping:
 
-- Shared by Development and Preview: all preview Supabase vars, `SUPABASE_STORAGE_BUCKET`, Stripe test vars, and non-production app URLs
-- Production only: all production Supabase vars, production bucket name, Stripe live vars, and production app URL
+- Shared by Development and Preview: all preview Supabase vars, `SUPABASE_STORAGE_BUCKET`, Flutterwave test vars, and non-production app URLs
+- Production only: all production Supabase vars, production bucket name, Flutterwave live vars, and production app URL
 - Safe to share everywhere for now: Gemini, Resend, PostHog, Sentry, and Upstash
 
 ### 3. Database migrations
@@ -161,29 +176,31 @@ In your Supabase project:
 npm run dev
 ```
 
-Open `http://localhost:3000`.
+Open your local app normally for non-payment work.
 
-For local Stripe testing:
+For local Flutterwave payment testing:
 
-```bash
-stripe listen --forward-to localhost:3000/api/webhooks/stripe
-```
+1. Start the app locally with `npm run dev`
+2. Start a public tunnel such as `ngrok http 3000` or `cloudflared tunnel --url http://localhost:3000`
+3. Set `NEXT_PUBLIC_APP_URL` to the tunnel HTTPS URL
+4. Open the app through that tunnel URL, not `localhost`
+5. Point Flutterwave test webhooks to `https://<your-tunnel>/api/webhooks/flutterwave`
 
-Use the printed `whsec_...` value as `STRIPE_WEBHOOK_SECRET` in `.env.local`.
+If `NEXT_PUBLIC_APP_URL` is still `localhost`, checkout will fail fast with a setup error because Flutterwave redirects will not work reliably against localhost.
 
 ## Deploying to Vercel
 
 1. Push to GitHub and import the repo in [Vercel](https://vercel.com/new)
 2. Add all environment variables to Vercel → **Settings → Environment Variables**
-3. Set `NEXT_PUBLIC_APP_URL` to your actual Vercel URL
+3. Set `NEXT_PUBLIC_APP_URL` to your actual public Vercel URL
 4. Deploy — migrations run automatically on first cold-start
 
-### Stripe webhook (production)
+### Flutterwave webhook (production)
 
-1. Stripe Dashboard → **Developers → Webhooks → Add endpoint**
-2. URL: `https://<your-app>.vercel.app/api/webhooks/stripe`
-3. Events to listen for: `checkout.session.completed`
-4. Copy the signing secret (`whsec_...`) into Vercel env as `STRIPE_WEBHOOK_SECRET`
+1. Flutterwave Dashboard → set the production webhook URL to `https://<your-app>.vercel.app/api/webhooks/flutterwave`
+2. Copy the webhook secret hash into Vercel env as `FLUTTERWAVE_WEBHOOK_SECRET_HASH`
+3. Set `PAYMENT_PROVIDER=flutterwave` in every Vercel environment unless you intentionally want a Stripe fallback
+4. Use Flutterwave test keys in Development and Preview, and Flutterwave live keys in Production
 
 ### Storage bucket
 
@@ -205,7 +222,7 @@ app/
   login/page.tsx
   api/
     extract/                # PDF/DOCX → text extraction + SOW detection
-    checkout/               # Create Stripe Checkout session
+    checkout/               # Create provider-specific checkout session
     generate/               # Gemini BOQ generation + save to DB
     rate-boq/               # Gemini rate filling for uploaded Excel BOQs
     compare-boqs/           # Compare baseline vs candidate BOQ pricing accuracy
@@ -214,13 +231,15 @@ app/
     boqs/[id]/assistant/    # AI edit assistant (streaming + preview modes)
     export/                 # Excel export (formatted or patched original)
     health/                 # GET /api/health — DB connectivity check
-    webhooks/stripe/        # Stripe payment confirmation
+    webhooks/stripe/        # Optional Stripe fallback webhook
+    webhooks/flutterwave/   # Flutterwave payment confirmation
   auth/callback/
 
 lib/
   config.ts
   supabase/
   stripe.ts
+  payments.ts
   analytics.ts
   db/
 
@@ -249,6 +268,7 @@ supabase/
 |---|---|---|
 | Tables do not exist | Migrations have not run | Run the SQL files or check the migration workflow |
 | Auth redirect loop | Supabase redirect URLs are wrong | Add `/auth/callback` in Supabase Auth settings |
-| Stripe checkout fails | `STRIPE_SECRET_KEY` is missing | Add the correct key in Vercel |
+| Stripe fallback checkout fails | `STRIPE_SECRET_KEY` is missing | Add the correct Stripe key only if you intentionally use Stripe |
+| Flutterwave checkout fails in production | `FLUTTERWAVE_SECRET_KEY` is missing or invalid | Add the correct live key in Vercel Production |
 | BOQ generation fails | `GEMINI_API_KEY` is missing or invalid | Add a valid Gemini key |
 | Sentry not receiving events | DSN is missing | Add `SENTRY_DSN` and `NEXT_PUBLIC_SENTRY_DSN` |

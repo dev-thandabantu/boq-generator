@@ -1097,12 +1097,12 @@ function RateBOQTab() {
           ) : `Pay $${(rateAmountCents / 100).toFixed(0)} & Add Rates →`}
         </button>
 
-        <p className="text-xs text-gray-600">Secure payment via Stripe. You will be redirected back after payment.</p>
+        <p className="text-xs text-gray-600">Secure payment. You will be redirected back after payment.</p>
 
         {stage === "paying" && (
           <div className="space-y-2">
             <Progress value={92} className="h-1.5 bg-white/10" />
-            <p className="text-xs text-gray-400">Redirecting to Stripe checkout...</p>
+            <p className="text-xs text-gray-400">Redirecting to secure checkout...</p>
           </div>
         )}
       </div>

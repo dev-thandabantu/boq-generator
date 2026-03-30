@@ -9,6 +9,7 @@ function GeneratingContent() {
   const router = useRouter();
   const params = useSearchParams();
   const sessionId = params.get("session_id");
+  const transactionId = params.get("transaction_id");
   const ph = usePostHog();
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState(10);
@@ -80,7 +81,7 @@ function GeneratingContent() {
           res = await fetch("/api/rate-boq", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ session_id: sessionId, rate_context: rateContext }),
+            body: JSON.stringify({ session_id: sessionId, transaction_id: transactionId, rate_context: rateContext }),
           });
         } else {
           // generate_boq: BOQ was already generated before payment.
@@ -89,7 +90,7 @@ function GeneratingContent() {
           res = await fetch("/api/unlock-boq", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ session_id: sessionId }),
+            body: JSON.stringify({ session_id: sessionId, transaction_id: transactionId }),
           });
         }
 
@@ -166,7 +167,7 @@ function GeneratingContent() {
     }
 
     unlock();
-  }, [sessionId, router]);
+  }, [sessionId, transactionId, router]);
 
   return (
     <main className="min-h-screen flex flex-col items-center justify-center px-4 py-16">

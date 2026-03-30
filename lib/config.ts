@@ -8,13 +8,19 @@ const REQUIRED_SERVER_VARS = [
   "NEXT_PUBLIC_SUPABASE_ANON_KEY",
   "SUPABASE_SERVICE_ROLE_KEY",
   "GEMINI_API_KEY",
-  "STRIPE_SECRET_KEY",
-  "STRIPE_WEBHOOK_SECRET",
   "NEXT_PUBLIC_APP_URL",
   "SUPABASE_STORAGE_BUCKET",
 ] as const;
 
-const missing = REQUIRED_SERVER_VARS.filter((key) => !process.env[key]);
+const deploymentEnv = process.env.VERCEL_ENV ?? (process.env.NODE_ENV === "production" ? "production" : "development");
+const paymentProvider = (process.env.PAYMENT_PROVIDER ??
+  "flutterwave") as "stripe" | "flutterwave";
+const providerSpecificVars =
+  paymentProvider === "flutterwave"
+    ? (["FLUTTERWAVE_SECRET_KEY"] as const)
+    : (["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"] as const);
+
+const missing = [...REQUIRED_SERVER_VARS, ...providerSpecificVars].filter((key) => !process.env[key]);
 
 if (missing.length > 0 && process.env.NODE_ENV === "production") {
   throw new Error(
@@ -27,8 +33,10 @@ export const config = {
   supabaseAnonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
   geminiApiKey: process.env.GEMINI_API_KEY!,
-  stripeSecretKey: process.env.STRIPE_SECRET_KEY!,
-  stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET!,
+  stripeSecretKey: process.env.STRIPE_SECRET_KEY ?? null,
+  stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET ?? null,
+  flutterwaveSecretKey: process.env.FLUTTERWAVE_SECRET_KEY ?? null,
+  paymentProvider,
   appUrl: process.env.NEXT_PUBLIC_APP_URL!,
   storageBucket: process.env.SUPABASE_STORAGE_BUCKET!,
   isProduction: process.env.NODE_ENV === "production",

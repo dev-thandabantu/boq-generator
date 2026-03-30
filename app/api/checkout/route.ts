@@ -1,11 +1,36 @@
 import { logger } from "@/lib/logger";
 import { NextRequest, NextResponse } from "next/server";
-import { getStripe } from "@/lib/stripe";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { ensureProfileExists } from "@/lib/supabase/ensure-profile";
 import { getTierForAmount, getTierForItemCount, loadTiers, loadRateTiers } from "@/lib/pricing";
+import {
+  createCheckoutSession,
+  createPaymentReference,
+  getActivePaymentProvider,
+  getFlutterwaveCurrency,
+  recordPendingPaymentIntent,
+} from "@/lib/payments";
 
 export const runtime = "nodejs";
+
+function getErrorContext(err: unknown) {
+  if (err instanceof Error) {
+    return { error: err.message };
+  }
+
+  if (err && typeof err === "object") {
+    const maybe = err as Record<string, unknown>;
+    return {
+      error: typeof maybe.message === "string" ? maybe.message : "Non-Error object thrown",
+      code: typeof maybe.code === "string" ? maybe.code : undefined,
+      details: typeof maybe.details === "string" ? maybe.details : undefined,
+      hint: typeof maybe.hint === "string" ? maybe.hint : undefined,
+      rawError: maybe,
+    };
+  }
+
+  return { error: String(err) };
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -30,6 +55,10 @@ export async function POST(req: NextRequest) {
 
     if (!user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    if (!user.email) {
+      return NextResponse.json({ error: "Your account needs an email address before checkout can start." }, { status: 400 });
     }
 
     const isRateBoq = type === "rate_boq";
@@ -100,32 +129,43 @@ export async function POST(req: NextRequest) {
       metadata.ref_code = refCode;
     }
 
-    const session = await getStripe().checkout.sessions.create({
-      mode: "payment",
-      customer_email: user.email ?? undefined,
+    const paymentReference = createPaymentReference(type, boq_id);
+    const provider = getActivePaymentProvider();
+    const currency = provider === "flutterwave" ? getFlutterwaveCurrency() : "usd";
+    const checkout = await createCheckoutSession({
+      reference: paymentReference,
+      amountCents,
+      currency,
+      customerEmail: user.email,
+      customerName: user.user_metadata?.full_name as string | undefined,
       metadata,
-      line_items: [
-        {
-          price_data: {
-            currency: "usd",
-            unit_amount: amountCents,
-            product_data: {
-              name: isRateBoq ? "BOQ Rate Filling" : "BOQ Generation",
-              description: isRateBoq
-                ? "AI fills missing rates in your existing Bill of Quantities"
-                : "AI-generated Bill of Quantities for your project",
-            },
-          },
-          quantity: 1,
-        },
-      ],
-      success_url: `${origin}/generating?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${origin}/upload`,
+      title: isRateBoq ? "BOQ Rate Filling" : "BOQ Generation",
+      description: isRateBoq
+        ? "AI fills missing rates in your existing Bill of Quantities"
+        : "AI-generated Bill of Quantities for your project",
+      origin,
     });
 
-    return NextResponse.json({ url: session.url });
+    await recordPendingPaymentIntent({
+      provider: checkout.provider,
+      reference: checkout.reference,
+      amountCents,
+      currency,
+      userId: user.id,
+      boqId: boq_id ?? null,
+    });
+
+    logger.info("Checkout intent recorded", {
+      paymentReference: checkout.reference,
+      provider: checkout.provider,
+      amountCents,
+      currency,
+      route: "checkout",
+    });
+
+    return NextResponse.json({ url: checkout.url, provider: checkout.provider, reference: checkout.reference });
   } catch (err) {
-    logger.error("Checkout session error", { error: err instanceof Error ? err.message : String(err), route: "checkout" });
+    logger.error("Checkout session error", { route: "checkout", ...getErrorContext(err) });
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });
   }

@@ -1,15 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getStripe } from "@/lib/stripe";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { ensureProfileExists } from "@/lib/supabase/ensure-profile";
 import { logger } from "@/lib/logger";
 import { trackEvent } from "@/lib/analytics";
+import { assertPaymentMatchesExpected, loadExpectedPayment, persistCompletedPayment, verifyPayment } from "@/lib/payments";
 
 export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
   try {
-    const { session_id } = (await req.json()) as { session_id: string };
+    const { session_id, transaction_id } = (await req.json()) as { session_id: string; transaction_id?: string };
 
     if (!session_id) {
       return NextResponse.json({ error: "session_id is required" }, { status: 400 });
@@ -25,13 +25,25 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Verify payment with Stripe
-    const stripeSession = await getStripe().checkout.sessions.retrieve(session_id);
-    if (stripeSession.payment_status !== "paid") {
+    const expectedPayment = await loadExpectedPayment(session_id);
+    if (expectedPayment.userId && expectedPayment.userId !== user.id) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
+    const payment = await verifyPayment(session_id, transaction_id);
+    if (!payment.paid) {
       return NextResponse.json({ error: "Payment not completed" }, { status: 402 });
     }
 
-    const boqId = stripeSession.metadata?.boq_id;
+    assertPaymentMatchesExpected(payment, expectedPayment);
+
+    logger.info("Unlock payment verified", {
+      paymentReference: payment.reference,
+      transactionId: payment.processorReference,
+      route: "unlock-boq",
+    });
+
+    const boqId = payment.metadata.boq_id ?? expectedPayment.boqId;
     if (!boqId) {
       return NextResponse.json({ error: "No BOQ linked to this session" }, { status: 404 });
     }
@@ -58,28 +70,16 @@ export async function POST(req: NextRequest) {
 
     // If webhook hasn't fired yet, mark it paid now (idempotent)
     if (boqRow.payment_status === "preview") {
-      const { error: updateError } = await serviceClient
-        .from("boqs")
-        .update({ payment_status: "paid", stripe_session_id: session_id })
-        .eq("id", boqId);
-
-      if (updateError) {
-        logger.error("Failed to mark BOQ as paid in unlock", { boqId, error: String(updateError), route: "unlock-boq" });
-      }
-
-      // Also upsert payment record in case webhook was delayed
-      await serviceClient.from("payments").upsert(
-        {
-          stripe_session_id: session_id,
-          stripe_payment_intent: stripeSession.payment_intent as string | null,
-          user_id: user.id,
-          amount_cents: stripeSession.amount_total ?? 2000,
-          currency: stripeSession.currency ?? "usd",
-          status: "completed",
-          boq_id: boqId,
-        },
-        { onConflict: "stripe_session_id", ignoreDuplicates: false }
-      );
+      await persistCompletedPayment({
+        provider: payment.provider,
+        reference: payment.reference,
+        processorReference: payment.processorReference,
+        userId: user.id,
+        boqId,
+        amountCents: payment.amountCents,
+        currency: payment.currency,
+        metadata: payment.metadata,
+      });
     }
 
     trackEvent(user.id, "boq_unlocked", { boqId, sessionId: session_id });
