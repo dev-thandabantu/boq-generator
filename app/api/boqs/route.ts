@@ -16,6 +16,7 @@ export async function GET() {
   const { data, error } = await supabase
     .from("boqs")
     .select("id, title, created_at, updated_at, data")
+    .eq("payment_status", "paid")
     .order("created_at", { ascending: false });
 
   if (error) {

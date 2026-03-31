@@ -1,28 +1,38 @@
 import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
+import { logger } from "@/lib/logger";
 import type {
   BOQArtifacts,
+  BOQDocumentType,
+  BOQEvidenceType,
   BOQDocument,
+  BOQPricingCategory,
+  BOQRateSkipReason,
+  DocumentClassification,
   BOQItem,
   BOQQuantityArtifactItem,
   BOQQualitySummary,
+  RequiredAttachment,
+  RequiredAttachmentType,
+  SourceBundleDocument,
+  SourceBundleStatus,
   BOQStructureArtifact,
   BOQValidationFlag,
 } from "./types";
 import { computeDeterministicQA, mergeQAScores } from "./boq-qa";
+import { buildDefaultRateReference } from "./rate-reference";
 
 type QuantitySource = "explicit" | "derived" | "assumed";
-type DocumentType =
-  | "construction_sow"
-  | "boq_or_cost_document"
-  | "technical_spec_non_construction"
-  | "software_product_spec"
-  | "unknown";
-type SOWValidationResult = {
-  isSOW: boolean;
-  reason: string;
-  confidence: number;
-  documentType: DocumentType;
-  flags: string[];
+type SOWValidationResult = DocumentClassification;
+export type GenerationInputDocument = {
+  document_id: string;
+  name: string;
+  role: "primary" | "supporting";
+  document_type?: BOQDocumentType | RequiredAttachmentType | "supporting_context";
+  text: string;
+  pages?: number | null;
+};
+type GenerationInputBundle = {
+  documents: GenerationInputDocument[];
 };
 
 type StructurePassResponse = {
@@ -38,6 +48,8 @@ type StructurePassResponse = {
       item_no?: string;
       description: string;
       unit?: string;
+      section_context?: string | null;
+      source_excerpt?: string | null;
       is_header?: boolean;
       note?: string | null;
     }>;
@@ -53,15 +65,33 @@ type QuantityPassResponse = {
     quantity_confidence?: number | null;
     source_excerpt?: string | null;
     source_anchor?: string | null;
+    source_document?: string | null;
+    evidence_type?: BOQEvidenceType | string | null;
+    derivation_note?: string | null;
     note?: string | null;
   }>;
 };
 
-const PRIMARY_MODEL = process.env.GEMINI_MODEL_PRIMARY || "gemini-2.5-pro";
-const FALLBACK_MODEL = process.env.GEMINI_MODEL_FALLBACK || "gemini-2.5-flash";
+const SHARED_PRIMARY_MODEL = process.env.GEMINI_MODEL_PRIMARY || "gemini-2.5-pro";
+const SHARED_FALLBACK_MODEL = process.env.GEMINI_MODEL_FALLBACK || "gemini-2.5-flash";
+const SOW_PRIMARY_MODEL =
+  process.env.GEMINI_SOW_MODEL_PRIMARY || SHARED_PRIMARY_MODEL || "gemini-2.5-pro";
+const SOW_FALLBACK_MODEL =
+  process.env.GEMINI_SOW_MODEL_FALLBACK || SHARED_FALLBACK_MODEL || "gemini-2.5-flash";
+const RATE_PRIMARY_MODEL =
+  process.env.GEMINI_RATE_MODEL_PRIMARY || SHARED_FALLBACK_MODEL || "gemini-2.5-flash";
+const RATE_FALLBACK_MODEL =
+  process.env.GEMINI_RATE_MODEL_FALLBACK || SHARED_PRIMARY_MODEL || "gemini-2.5-pro";
 const MAX_ATTEMPTS_PER_MODEL = 3;
-const MODEL_CANDIDATES = Array.from(
-  new Set([PRIMARY_MODEL, FALLBACK_MODEL, "gemini-2.5-flash"].filter(Boolean))
+const RATE_FILL_BATCH_SIZE = 24;
+const DEFAULT_MODEL_CANDIDATES = Array.from(
+  new Set([SHARED_PRIMARY_MODEL, SHARED_FALLBACK_MODEL, "gemini-2.5-flash"].filter(Boolean))
+);
+const SOW_MODEL_CANDIDATES = Array.from(
+  new Set([SOW_PRIMARY_MODEL, SOW_FALLBACK_MODEL, "gemini-2.5-flash"].filter(Boolean))
+);
+const RATE_MODEL_CANDIDATES = Array.from(
+  new Set([RATE_PRIMARY_MODEL, RATE_FALLBACK_MODEL, "gemini-2.5-flash"].filter(Boolean))
 );
 const SOW_HEADING_TERMS = [
   "bill of quantities",
@@ -197,6 +227,18 @@ const NON_SOW_ABSTRACT_SECTION_TERMS = [
 ];
 const NON_SOW_PRODUCT_PATTERN =
   /\b(?:dashboard|workflow|admin ui|user story|acceptance criteria|schema|api|configuration-driven|whatsapp)\b/gi;
+const REQUIRED_ATTACHMENT_PATTERNS: Array<{
+  pattern: RegExp;
+  type: RequiredAttachmentType;
+  reason: string;
+}> = [
+  { pattern: /\brefer to (the )?attached boq\b/i, type: "boq", reason: "The SOW explicitly refers to an attached BOQ." },
+  { pattern: /\bunabridged boq attached\b/i, type: "boq", reason: "The SOW says the unabridged BOQ is attached." },
+  { pattern: /\bappendix\s+[a-z0-9]+\b/i, type: "schedule", reason: "The SOW references an appendix that may contain scope detail." },
+  { pattern: /\battached drawing\b/i, type: "drawing", reason: "The SOW references an attached drawing." },
+  { pattern: /\bdrawing to be issued\b/i, type: "drawing", reason: "The SOW states that a drawing is required or will be issued separately." },
+  { pattern: /\bdocuments attached to this scope\b/i, type: "schedule", reason: "The SOW lists supporting documents attached to the scope." },
+];
 
 function countTextHits(text: string, terms: string[]): number {
   return terms.reduce((count, term) => count + (text.includes(term) ? 1 : 0), 0);
@@ -222,12 +264,50 @@ function isUnavailableModelError(error: unknown): boolean {
   );
 }
 
+function isRetryableModelError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return (
+    message.includes("fetch failed") ||
+    message.includes("502") ||
+    message.includes("bad gateway") ||
+    message.includes("503") ||
+    message.includes("service unavailable") ||
+    message.includes("high demand") ||
+    message.includes("temporarily unavailable") ||
+    message.includes("deadline exceeded") ||
+    message.includes("timeout") ||
+    message.includes("etimedout") ||
+    message.includes("econnreset") ||
+    message.includes("econnrefused") ||
+    message.includes("enotfound") ||
+    message.includes("network") ||
+    message.includes("socket hang up")
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isMalformedJsonError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return (
+    message.includes("unterminated string") ||
+    message.includes("unexpected non-whitespace character") ||
+    message.includes("expected ',' or ']'") ||
+    message.includes("expected ',' or '}'") ||
+    message.includes("unexpected end of json input") ||
+    message.includes("json at position")
+  );
+}
+
 async function generateStructuredContent<T>({
   prompt,
   responseSchema,
   systemInstruction,
   temperature,
   preferredModel,
+  modelCandidates,
   thinkingBudget = -1,
 }: {
   prompt: string;
@@ -235,32 +315,54 @@ async function generateStructuredContent<T>({
   systemInstruction?: string;
   temperature: number;
   preferredModel?: string;
+  modelCandidates?: string[];
   /** Gemini thinking token budget. -1 = dynamic (default). 0 = disabled. */
   thinkingBudget?: number;
 }): Promise<T> {
   const candidates = Array.from(
-    new Set([preferredModel, ...MODEL_CANDIDATES].filter(Boolean))
+    new Set([preferredModel, ...(modelCandidates ?? DEFAULT_MODEL_CANDIDATES)].filter(Boolean))
   ) as string[];
 
   let lastError: unknown;
   for (const modelName of candidates) {
-    try {
-      const model = getGenAI().getGenerativeModel({
-        model: modelName,
-        systemInstruction,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        generationConfig: {
-          responseMimeType: "application/json",
-          responseSchema: responseSchema as any,
-          temperature,
-          thinkingConfig: { thinkingBudget },
-        } as any,
-      });
-      const result = await model.generateContent(prompt);
-      return parseJsonResponse<T>(result.response.text());
-    } catch (error) {
-      lastError = error;
-      if (!isUnavailableModelError(error)) {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt += 1) {
+      try {
+        const model = getGenAI().getGenerativeModel({
+          model: modelName,
+          systemInstruction,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: responseSchema as any,
+            temperature,
+            thinkingConfig: { thinkingBudget },
+          } as any,
+        });
+        const result = await model.generateContent(prompt);
+        return parseJsonResponse<T>(result.response.text());
+      } catch (error) {
+        lastError = error;
+
+        if (isUnavailableModelError(error)) {
+          break;
+        }
+
+        if (isRetryableModelError(error)) {
+          if (attempt < MAX_ATTEMPTS_PER_MODEL) {
+            await sleep(1000 * attempt);
+            continue;
+          }
+          break;
+        }
+
+        if (isMalformedJsonError(error)) {
+          if (attempt < MAX_ATTEMPTS_PER_MODEL) {
+            await sleep(750 * attempt);
+            continue;
+          }
+          break;
+        }
+
         throw error;
       }
     }
@@ -269,8 +371,70 @@ async function generateStructuredContent<T>({
   throw lastError instanceof Error ? lastError : new Error("No Gemini model was available.");
 }
 
-function inferSOWHeuristics(text: string): SOWValidationResult {
+function detectRequiredAttachments(text: string): RequiredAttachment[] {
+  const matches = REQUIRED_ATTACHMENT_PATTERNS.filter(({ pattern }) => pattern.test(text));
+  const deduped = new Map<string, RequiredAttachment>();
+  for (const match of matches) {
+    const key = `${match.type}:${match.reason}`;
+    deduped.set(key, {
+      type: match.type,
+      reason: match.reason,
+      required: true,
+    });
+  }
+  return Array.from(deduped.values());
+}
+
+function inferSourceBundleStatus(
+  requiredAttachments: RequiredAttachment[],
+  supportingDocsCount = 0
+): SourceBundleStatus {
+  if (requiredAttachments.length > 0 && supportingDocsCount < requiredAttachments.length) {
+    return "missing_required_attachments";
+  }
+  if (supportingDocsCount > 0 && requiredAttachments.length === 0) {
+    return "partial_optional_context";
+  }
+  return "complete";
+}
+
+function normalizeSourceDocumentType(
+  type: GenerationInputDocument["document_type"] | undefined,
+  role: "primary" | "supporting"
+): SourceBundleDocument["document_type"] {
+  if (type) return type;
+  return role === "primary" ? "construction_sow" : "supporting_context";
+}
+
+function buildSourceBundle(documents: GenerationInputDocument[]): SourceBundleDocument[] {
+  return documents.map((doc) => ({
+    document_id: doc.document_id,
+    name: doc.name,
+    document_type: normalizeSourceDocumentType(doc.document_type, doc.role),
+    role: doc.role,
+    pages: doc.pages ?? null,
+  }));
+}
+
+function buildPromptBundle(documents: GenerationInputDocument[]): string {
+  return documents
+    .map((doc, index) => {
+      const label = doc.role === "primary" ? "PRIMARY SOW" : `ATTACHED ${doc.document_type ?? "DOCUMENT"}`;
+      return [
+        `### ${label} ${index + 1}`,
+        `document_id: ${doc.document_id}`,
+        `name: ${doc.name}`,
+        `pages: ${doc.pages ?? "unknown"}`,
+        doc.text,
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+function inferSOWHeuristics(text: string, supportingDocsCount = 0): SOWValidationResult {
   const preview = text.slice(0, 12000).toLowerCase();
+  const requiredAttachments = detectRequiredAttachments(text);
+  const sourceBundleStatus = inferSourceBundleStatus(requiredAttachments, supportingDocsCount);
   const headingHits = countTextHits(preview, SOW_HEADING_TERMS);
   const tradeHits = countTextHits(preview, TRADE_SECTION_TERMS);
   const executionHits = countTextHits(preview, CONSTRUCTION_EXECUTION_TERMS);
@@ -317,6 +481,8 @@ function inferSOWHeuristics(text: string): SOWValidationResult {
   ].filter(Boolean).length;
 
   const flags: string[] = [];
+  const positiveSignals: string[] = [];
+  const negativeSignals: string[] = [];
   if (positiveCategories < 2) flags.push("Missing enough construction-document markers for a reliable SOW classification.");
   if (tradeHits < 2) flags.push("Very few construction trade sections were found.");
   if (unitHits < 3 && specHits < 2) flags.push("Very little measurable or material/specification language was found.");
@@ -324,6 +490,16 @@ function inferSOWHeuristics(text: string): SOWValidationResult {
   if (productHits >= 3) flags.push("Document reads more like a product/system specification than a construction works scope.");
   if (creativeHits >= 2) flags.push("Document reads more like creative or lyrical content than a project scope.");
   if (commercialHits >= 2) flags.push("Document reads more like a commercial/rate schedule than a scope document.");
+  if (headingHits >= 2) positiveSignals.push("Contains recognised scope/BOQ headings.");
+  if (tradeHits >= 2) positiveSignals.push("Contains construction trade sections.");
+  if (executionHits >= 4) positiveSignals.push("Contains contractor/specification execution language.");
+  if (unitHits >= 4 || specHits >= 3) positiveSignals.push("Contains measurable/specification detail.");
+  if (hasBOQTableSignals) positiveSignals.push("Contains BOQ-style tabular columns.");
+  if (questionnaireHits >= 2) negativeSignals.push("Questionnaire/survey style prompts detected.");
+  if (productHits >= 3) negativeSignals.push("Product/software specification language detected.");
+  if (creativeHits >= 2) negativeSignals.push("Creative or lyrical language detected.");
+  if (commercialHits >= 2) negativeSignals.push("Commercial/rate-sheet language detected.");
+  if (abstractSectionHits >= 4) negativeSignals.push("Abstract planning sections outweigh scope detail.");
 
   const positiveScore =
     headingHits * 1.35 +
@@ -349,6 +525,11 @@ function inferSOWHeuristics(text: string): SOWValidationResult {
         "This looks like a rate sheet, priced BOQ, or commercial schedule rather than a statement of work describing the underlying construction scope.",
       confidence: 0.9,
       documentType: "boq_or_cost_document",
+      should_block_generation: true,
+      required_attachments: requiredAttachments,
+      source_bundle_status: sourceBundleStatus,
+      positive_signals: positiveSignals,
+      negative_signals: negativeSignals,
       flags,
     };
   }
@@ -361,10 +542,16 @@ function inferSOWHeuristics(text: string): SOWValidationResult {
       confidence: clamp01(0.8 + Math.min(0.14, Math.abs(negativeScore - positiveScore) * 0.02)),
       documentType:
         creativeHits >= 2 || questionnaireHits >= 2
-          ? "technical_spec_non_construction"
+          ? "questionnaire_or_survey"
           : productHits >= 3
-            ? "software_product_spec"
+            ? "product_or_software_spec"
             : "unknown",
+      should_block_generation:
+        sourceBundleStatus === "missing_required_attachments" ? true : true,
+      required_attachments: requiredAttachments,
+      source_bundle_status: sourceBundleStatus,
+      positive_signals: positiveSignals,
+      negative_signals: negativeSignals,
       flags,
     };
   }
@@ -375,7 +562,13 @@ function inferSOWHeuristics(text: string): SOWValidationResult {
       reason:
         "This document contains the sectioning, trade language, contractor obligations, and measurable specification detail expected in a construction SOW/BOQ source.",
       confidence: clamp01(0.72 + Math.min(0.18, (positiveScore - negativeScore) * 0.03)),
-      documentType: hasBOQTableSignals ? "boq_or_cost_document" : "construction_sow",
+      documentType:
+        hasBOQTableSignals && hasScopeLikeContent ? "engineering_spec" : "construction_sow",
+      should_block_generation: sourceBundleStatus === "missing_required_attachments",
+      required_attachments: requiredAttachments,
+      source_bundle_status: sourceBundleStatus,
+      positive_signals: positiveSignals,
+      negative_signals: negativeSignals,
       flags,
     };
   }
@@ -387,10 +580,15 @@ function inferSOWHeuristics(text: string): SOWValidationResult {
     confidence: clamp01(0.55 + Math.min(0.2, Math.abs(negativeScore - positiveScore) * 0.02)),
     documentType:
       questionnaireHits >= 2 || creativeHits >= 2
-        ? "technical_spec_non_construction"
+        ? "creative_or_unstructured"
         : productHits >= 3
-          ? "software_product_spec"
+          ? "product_or_software_spec"
           : "unknown",
+    should_block_generation: true,
+    required_attachments: requiredAttachments,
+    source_bundle_status: sourceBundleStatus,
+    positive_signals: positiveSignals,
+    negative_signals: negativeSignals,
     flags,
   };
 }
@@ -424,6 +622,8 @@ const STRUCTURE_SCHEMA = {
                 item_no: { type: SchemaType.STRING, nullable: true },
                 description: { type: SchemaType.STRING },
                 unit: { type: SchemaType.STRING, nullable: true },
+                section_context: { type: SchemaType.STRING, nullable: true },
+                source_excerpt: { type: SchemaType.STRING, nullable: true },
                 is_header: { type: SchemaType.BOOLEAN, nullable: true },
                 note: { type: SchemaType.STRING, nullable: true },
               },
@@ -453,6 +653,9 @@ const QUANTITY_SCHEMA = {
           quantity_confidence: { type: SchemaType.NUMBER, nullable: true },
           source_excerpt: { type: SchemaType.STRING, nullable: true },
           source_anchor: { type: SchemaType.STRING, nullable: true },
+          source_document: { type: SchemaType.STRING, nullable: true },
+          evidence_type: { type: SchemaType.STRING, nullable: true },
+          derivation_note: { type: SchemaType.STRING, nullable: true },
           note: { type: SchemaType.STRING, nullable: true },
         },
         required: ["item_key", "qty"],
@@ -504,14 +707,23 @@ RULES:
    - assumed: uncertain or not stated
 4. If uncertain, set qty null and quantity_source assumed.
 5. Set quantity_confidence between 0 and 1.
-6. Use standard units (m, m², m³, No., Item, LS, kg, t).`;
+6. Use standard units (m, m², m³, No., Item, LS, kg, t).
+7. Set evidence_type:
+   - quoted_scope: directly quoted from prose scope
+   - tabulated_scope: from tabular BOQ/schedule text
+   - derived_calculation: calculated from stated dimensions
+   - metadata_only: only document metadata available
+   - missing: no usable evidence
+8. Set source_anchor to the nearest page marker (for example "Page 3") when page markers are present. Otherwise use the nearest section heading or document anchor.
+9. Set source_document to the document_id that the evidence came from.
+10. If evidence_type is derived_calculation, add derivation_note explaining the math briefly.`;
 
 async function generateStructure(
-  sowText: string,
+  bundleText: string,
   recoveryMode: boolean
 ): Promise<StructurePassResponse> {
   return callModel<StructurePassResponse>({
-    prompt: `Extract BOQ structure only from this SOW:\n\n${sowText}`,
+    prompt: `Extract BOQ structure only from this document bundle:\n\n${bundleText}`,
     responseSchema: STRUCTURE_SCHEMA,
     systemInstruction: recoveryMode ? STRUCTURE_RECOVERY_PROMPT : STRUCTURE_PROMPT,
     temperature: recoveryMode ? 0.3 : 0.2,
@@ -519,7 +731,7 @@ async function generateStructure(
 }
 
 async function extractQuantities(
-  sowText: string,
+  bundleText: string,
   structure: BOQStructureArtifact
 ): Promise<QuantityPassResponse> {
   const itemCatalog = structure.bills.flatMap((bill) =>
@@ -536,7 +748,7 @@ async function extractQuantities(
   );
 
   return callModel<QuantityPassResponse>({
-    prompt: `SOW TEXT:\n${sowText}\n\nITEMS TO QUANTIFY (JSON):\n${JSON.stringify(
+    prompt: `DOCUMENT BUNDLE:\n${bundleText}\n\nITEMS TO QUANTIFY (JSON):\n${JSON.stringify(
       itemCatalog
     )}`,
     responseSchema: QUANTITY_SCHEMA,
@@ -557,7 +769,8 @@ async function callModel<T>({
   temperature: number;
 }): Promise<T> {
   return generateStructuredContent<T>({
-    preferredModel: PRIMARY_MODEL,
+    preferredModel: SOW_PRIMARY_MODEL,
+    modelCandidates: SOW_MODEL_CANDIDATES,
     prompt,
     responseSchema,
     systemInstruction,
@@ -570,7 +783,34 @@ function parseJsonResponse<T>(raw: string): T {
   const cleaned = trimmed.startsWith("```")
     ? trimmed.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/, "")
     : trimmed;
-  return JSON.parse(cleaned) as T;
+
+  const candidates = [
+    cleaned,
+    cleaned.replace(/^\uFEFF/, ""),
+  ];
+
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    candidates.push(cleaned.slice(firstBrace, lastBrace + 1));
+  }
+
+  const firstBracket = cleaned.indexOf("[");
+  const lastBracket = cleaned.lastIndexOf("]");
+  if (firstBracket !== -1 && lastBracket > firstBracket) {
+    candidates.push(cleaned.slice(firstBracket, lastBracket + 1));
+  }
+
+  let lastError: unknown;
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate) as T;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Could not parse model JSON response.");
 }
 
 function normalizeStructure(raw: StructurePassResponse): BOQStructureArtifact {
@@ -593,6 +833,8 @@ function normalizeStructure(raw: StructurePassResponse): BOQStructureArtifact {
           item_no: safeText(item.item_no, ""),
           description: safeText(item.description, "Unspecified work item"),
           unit: normalizeUnit(item.unit),
+          section_context: safeNullableText(item.section_context) ?? undefined,
+          source_excerpt: safeNullableText(item.source_excerpt),
           is_header: isHeader,
           note: item.note ?? undefined,
         };
@@ -606,6 +848,127 @@ function countNonHeaderItems(structure: BOQStructureArtifact): number {
     (sum, bill) => sum + bill.items.filter((item) => !item.is_header).length,
     0
   );
+}
+
+function normalizeLabelText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/["'`]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\b(the|and|for|with|including|new|approved|complete|as|per)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isCountableDrawingLabel(description: string): boolean {
+  const normalized = normalizeLabelText(description);
+  if (!normalized) return false;
+  const wordCount = normalized.split(" ").length;
+  const hasComma = description.includes(",");
+  const hasLongSentence = wordCount > 5;
+  const actionLike = /\b(install|construct|provide|erect|supply|lay|testing|commissioning)\b/i.test(
+    description
+  );
+  return !hasComma && !hasLongSentence && !actionLike;
+}
+
+function countLabelMatches(text: string, description: string): { count: number; excerpt: string | null } {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const normalizedTarget = normalizeLabelText(description);
+  if (!normalizedTarget) return { count: 0, excerpt: null };
+
+  let count = 0;
+  let excerpt: string | null = null;
+  for (const line of lines) {
+    const normalizedLine = normalizeLabelText(line);
+    if (!normalizedLine) continue;
+    if (
+      normalizedLine === normalizedTarget ||
+      normalizedLine.includes(normalizedTarget) ||
+      normalizedTarget.includes(normalizedLine)
+    ) {
+      count += 1;
+      if (!excerpt) excerpt = line;
+    }
+  }
+
+  return { count, excerpt };
+}
+
+function supportingDocsSatisfyRequirements(
+  documents: GenerationInputDocument[],
+  requiredAttachments: RequiredAttachment[]
+): boolean {
+  const supportingTypes = new Set(
+    documents
+      .filter((doc) => doc.role === "supporting")
+      .map((doc) => String(doc.document_type || "").toLowerCase())
+  );
+
+  return requiredAttachments.every((attachment) => {
+    const type = attachment.type.toLowerCase();
+    if (type === "unknown") return supportingTypes.size > 0;
+    return supportingTypes.has(type) || supportingTypes.has(`${type}s`);
+  });
+}
+
+function applyDrawingCountHeuristics(
+  structure: BOQStructureArtifact,
+  quantities: QuantityPassResponse,
+  documents: GenerationInputDocument[]
+): QuantityPassResponse {
+  const itemMeta = new Map<string, { description: string; unit: string }>();
+  for (const bill of structure.bills) {
+    for (const item of bill.items) {
+      if (!item.is_header) {
+        itemMeta.set(item.item_key, { description: item.description, unit: item.unit });
+      }
+    }
+  }
+
+  const supportingDocs = documents.filter((doc) => doc.role === "supporting" && doc.text.trim().length > 0);
+  if (supportingDocs.length === 0) return quantities;
+
+  return {
+    items: (quantities.items ?? []).map((item) => {
+      if (item.qty !== null && item.qty !== undefined) return item;
+      const meta = itemMeta.get(item.item_key);
+      if (!meta || !isCountableDrawingLabel(meta.description)) return item;
+
+      let best: { count: number; excerpt: string | null; docId: string | null } = {
+        count: 0,
+        excerpt: null,
+        docId: null,
+      };
+
+      for (const doc of supportingDocs) {
+        const match = countLabelMatches(doc.text, meta.description);
+        if (match.count > best.count) {
+          best = { count: match.count, excerpt: match.excerpt, docId: doc.document_id };
+        }
+      }
+
+      if (best.count <= 0 || best.count > 5) return item;
+
+      return {
+        ...item,
+        qty: best.count,
+        unit: item.unit ?? (meta.unit && meta.unit !== "Item" ? meta.unit : "No."),
+        quantity_source: "derived",
+        quantity_confidence: 0.72,
+        source_excerpt: best.excerpt ?? item.source_excerpt ?? null,
+        source_anchor: item.source_anchor ?? "Drawing label count",
+        source_document: best.docId ?? item.source_document ?? null,
+        evidence_type: "derived_calculation",
+        derivation_note:
+          item.derivation_note ??
+          `Counted ${best.count} matching drawing label${best.count === 1 ? "" : "s"} for "${meta.description}".`,
+      };
+    }),
+  };
 }
 
 /**
@@ -634,7 +997,37 @@ const SOW_VALIDATION_SCHEMA = {
     documentType: {
       type: SchemaType.STRING,
       description:
-        "One of: construction_sow, boq_or_cost_document, technical_spec_non_construction, software_product_spec, unknown",
+        "One of: construction_sow, engineering_spec, boq_or_cost_document, questionnaire_or_survey, product_or_software_spec, creative_or_unstructured, unknown",
+    },
+    should_block_generation: {
+      type: SchemaType.BOOLEAN,
+      description: "True when BOQ generation should be blocked for this document",
+    },
+    required_attachments: {
+      type: SchemaType.ARRAY,
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          type: { type: SchemaType.STRING },
+          reason: { type: SchemaType.STRING },
+          required: { type: SchemaType.BOOLEAN },
+        },
+        required: ["type", "reason", "required"],
+      },
+    },
+    source_bundle_status: {
+      type: SchemaType.STRING,
+      description: "One of: complete, missing_required_attachments, partial_optional_context",
+    },
+    positive_signals: {
+      type: SchemaType.ARRAY,
+      items: { type: SchemaType.STRING },
+      description: "General construction-document signals detected in the input",
+    },
+    negative_signals: {
+      type: SchemaType.ARRAY,
+      items: { type: SchemaType.STRING },
+      description: "Signals suggesting the document is not a valid BOQ source",
     },
     flags: {
       type: SchemaType.ARRAY,
@@ -642,12 +1035,26 @@ const SOW_VALIDATION_SCHEMA = {
       description: "Specific warning flags that influenced the determination",
     },
   },
-  required: ["isSOW", "reason", "confidence", "documentType", "flags"],
+  required: [
+    "isSOW",
+    "reason",
+    "confidence",
+    "documentType",
+    "should_block_generation",
+    "required_attachments",
+    "source_bundle_status",
+    "positive_signals",
+    "negative_signals",
+    "flags",
+  ],
 };
 
-export async function validateSOW(text: string): Promise<SOWValidationResult> {
+export async function validateSOW(
+  text: string,
+  opts?: { supportingDocsCount?: number }
+): Promise<SOWValidationResult> {
   const preview = text.slice(0, 6000);
-  const heuristic = inferSOWHeuristics(text);
+  const heuristic = inferSOWHeuristics(text, opts?.supportingDocsCount ?? 0);
 
   if (!heuristic.isSOW && heuristic.confidence >= 0.82) {
     return heuristic;
@@ -655,7 +1062,8 @@ export async function validateSOW(text: string): Promise<SOWValidationResult> {
 
   try {
     const llm = await generateStructuredContent<SOWValidationResult>({
-      preferredModel: FALLBACK_MODEL,
+      preferredModel: SOW_FALLBACK_MODEL,
+      modelCandidates: SOW_MODEL_CANDIDATES,
       responseSchema: SOW_VALIDATION_SCHEMA,
       temperature: 0,
       prompt: `Analyse this document excerpt and classify whether it is suitable for construction BOQ generation.
@@ -676,8 +1084,9 @@ ${preview}`,
 
     const llmLooksNonSow =
       !llm.isSOW ||
-      llm.documentType === "software_product_spec" ||
-      llm.documentType === "technical_spec_non_construction" ||
+      llm.documentType === "product_or_software_spec" ||
+      llm.documentType === "questionnaire_or_survey" ||
+      llm.documentType === "creative_or_unstructured" ||
       llm.documentType === "boq_or_cost_document";
 
     if (!heuristic.isSOW && llmLooksNonSow) {
@@ -687,6 +1096,19 @@ ${preview}`,
         confidence: clamp01(Math.max(heuristic.confidence, llm.confidence ?? 0.7)),
         documentType:
           llm.documentType === "unknown" ? heuristic.documentType : llm.documentType,
+        should_block_generation: llm.should_block_generation ?? true,
+        required_attachments:
+          llm.required_attachments?.length > 0
+            ? llm.required_attachments
+            : heuristic.required_attachments,
+        source_bundle_status:
+          llm.source_bundle_status ?? heuristic.source_bundle_status,
+        positive_signals: Array.from(
+          new Set([...(heuristic.positive_signals ?? []), ...(llm.positive_signals ?? [])])
+        ).slice(0, 6),
+        negative_signals: Array.from(
+          new Set([...(heuristic.negative_signals ?? []), ...(llm.negative_signals ?? [])])
+        ).slice(0, 6),
         flags: Array.from(new Set([...heuristic.flags, ...(llm.flags ?? [])])).slice(0, 6),
       };
     }
@@ -698,13 +1120,26 @@ ${preview}`,
         confidence: clamp01(Math.max(heuristic.confidence, llm.confidence ?? 0.65)),
         documentType:
           llm.documentType === "unknown" ? heuristic.documentType : llm.documentType,
+        should_block_generation: llm.should_block_generation ?? false,
+        required_attachments:
+          llm.required_attachments?.length > 0
+            ? llm.required_attachments
+            : heuristic.required_attachments,
+        source_bundle_status:
+          llm.source_bundle_status ?? heuristic.source_bundle_status,
+        positive_signals: Array.from(
+          new Set([...(heuristic.positive_signals ?? []), ...(llm.positive_signals ?? [])])
+        ).slice(0, 6),
+        negative_signals: Array.from(
+          new Set([...(heuristic.negative_signals ?? []), ...(llm.negative_signals ?? [])])
+        ).slice(0, 6),
         flags: Array.from(new Set([...heuristic.flags, ...(llm.flags ?? [])])).slice(0, 6),
       };
     }
 
     return heuristic.confidence >= (llm.confidence ?? 0.5) ? heuristic : llm;
   } catch (error) {
-    console.warn("validateSOW falling back to heuristic classification:", error);
+    logger.warn("validateSOW falling back to heuristic classification", { error: String(error) });
     return heuristic;
   }
 }
@@ -722,8 +1157,19 @@ const QA_SCHEMA = {
       items: { type: SchemaType.STRING },
       description: "List of specific quality warnings or issues found (empty array if none)",
     },
+    subscores: {
+      type: SchemaType.OBJECT,
+      properties: {
+        coverage: { type: SchemaType.NUMBER },
+        source_completeness: { type: SchemaType.NUMBER },
+        field_integrity: { type: SchemaType.NUMBER },
+        evidence_traceability: { type: SchemaType.NUMBER },
+        boq_semantics: { type: SchemaType.NUMBER },
+      },
+      required: ["coverage", "source_completeness", "field_integrity", "evidence_traceability", "boq_semantics"],
+    },
   },
-  required: ["score", "grade", "summary", "flags"],
+  required: ["score", "grade", "summary", "flags", "subscores"],
 };
 
 export async function scoreBOQ(boq: import("./types").BOQDocument): Promise<{
@@ -731,6 +1177,13 @@ export async function scoreBOQ(boq: import("./types").BOQDocument): Promise<{
   grade: "Strong" | "Good" | "Fair" | "Weak";
   summary: string;
   flags: string[];
+  subscores?: {
+    coverage: number;
+    source_completeness: number;
+    field_integrity: number;
+    evidence_traceability: number;
+    boq_semantics: number;
+  };
   source?: "deterministic" | "hybrid";
   updated_at?: string;
 }> {
@@ -762,15 +1215,23 @@ export async function scoreBOQ(boq: import("./types").BOQDocument): Promise<{
       grade: "Strong" | "Good" | "Fair" | "Weak";
       summary: string;
       flags: string[];
+      subscores: {
+        coverage: number;
+        source_completeness: number;
+        field_integrity: number;
+        evidence_traceability: number;
+        boq_semantics: number;
+      };
     }>({
-      preferredModel: FALLBACK_MODEL,
+      preferredModel: SOW_FALLBACK_MODEL,
+      modelCandidates: SOW_MODEL_CANDIDATES,
       responseSchema: QA_SCHEMA,
       temperature: 0,
       prompt: `You are a senior quantity surveyor reviewing a generated Bill of Quantities for quality. Score this BOQ and identify any issues.\n\nBOQ summary:\n${summary}\n\nKnown deterministic assessment:\nScore ${deterministic.score}/10, grade ${deterministic.grade}, flags: ${deterministic.flags.join("; ") || "none"}.\n\nFull BOQ (JSON):\n${JSON.stringify(boq, null, 2).slice(0, 16000)}`,
     });
     return mergeQAScores(deterministic, llm);
   } catch (error) {
-    console.warn("Falling back to deterministic QA score:", error);
+    logger.warn("Falling back to deterministic QA score", { error: String(error) });
     return deterministic;
   }
 }
@@ -898,6 +1359,9 @@ const RATES_SCHEMA = {
           item_key: { type: SchemaType.STRING },
           rate: { type: SchemaType.NUMBER, nullable: true },
           amount: { type: SchemaType.NUMBER, nullable: true },
+          source_category: { type: SchemaType.STRING, nullable: true },
+          rationale: { type: SchemaType.STRING, nullable: true },
+          confidence: { type: SchemaType.NUMBER, nullable: true },
         },
         required: ["item_key"],
       },
@@ -995,7 +1459,8 @@ type BOQValidationResult = {
 export async function validateBOQ(csvText: string): Promise<BOQValidationResult> {
   const preview = csvText.slice(0, 8000);
   return generateStructuredContent<BOQValidationResult>({
-    preferredModel: FALLBACK_MODEL,
+    preferredModel: RATE_FALLBACK_MODEL,
+    modelCandidates: RATE_MODEL_CANDIDATES,
     responseSchema: BOQ_VALIDATION_SCHEMA,
     temperature: 0,
     prompt: `Analyse the following spreadsheet data (CSV/table format) and determine whether it is a genuine Bill of Quantities (BOQ).
@@ -1014,48 +1479,406 @@ ${preview}`,
   });
 }
 
-async function fillRatesPass(boq: BOQDocument): Promise<BOQDocument> {
-  const allItems = boq.bills.flatMap((bill) =>
-    bill.items
-      .filter((item) => !item.is_header && item.rate === null)
-      .map((item) => ({
-        item_key: item.item_key ?? `${item.item_no || item.description.slice(0, 20)}`,
-        description: item.description,
-        unit: item.unit,
-        qty: item.qty,
-      }))
+function normalizeRateKey(description: string, unit: string): string {
+  const normalizedDescription = description
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const normalizedUnit = unit
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return `${normalizedDescription}::${normalizedUnit}`;
+}
+
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[middle - 1] + sorted[middle]) / 2
+    : sorted[middle];
+}
+
+function chunkArray<T>(items: T[], size: number): T[][];
+function chunkArray<T>(items: T[], size: number): Array<T[]> {
+  if (size <= 0) return [items];
+  const chunks: Array<T[]> = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+function buildExistingRateReferences(
+  existingRates: Array<{ description: string; unit: string; rate: number; bill: string }>,
+  batch: Array<{ description: string; unit: string; bill: string }>
+) {
+  const batchBills = new Set(batch.map((item) => item.bill));
+  const batchUnits = new Set(batch.map((item) => item.unit.toLowerCase()));
+
+  const preferred = existingRates.filter(
+    (row) => batchBills.has(row.bill) || batchUnits.has(row.unit.toLowerCase())
   );
 
-  if (allItems.length === 0) return boq;
+  return (preferred.length > 0 ? preferred : existingRates).slice(0, 60);
+}
 
-  const result = await generateStructuredContent<{ items: Array<{ item_key: string; rate: number | null; amount: number | null }> }>({
-    preferredModel: PRIMARY_MODEL,
-    responseSchema: RATES_SCHEMA,
-    temperature: 0.1,
-    systemInstruction: `You are a quantity surveyor estimating rates for a Zambian construction BOQ.\n\n${RATES_INSTRUCTION}`,
-    prompt: `Estimate ZMW rates for the following BOQ items. Return rate and amount for each item_key.\n\n${JSON.stringify(allItems)}`,
-  });
+function classifyPricingCategory(description: string, unit: string): BOQPricingCategory {
+  const text = `${normalizeRateKey(description, unit)} ${normalizeRateKey(unit, "")}`.trim();
+  if (/\bditto\b|\bincluding\b|\bincl\b/.test(text)) return "ditto_reference";
+  if (/\bant proof\b|\bantproof\b|\btermite\b|\binsecticide\b|\btreatment\b|\bdestroy termites\b/.test(text)) {
+    return "treatment_service";
+  }
+  if (/\bmantis\b|\bgrating\b|\bbaluster\b|\brsa\b|\btread support\b|\bbracing\b|\bhandrail\b|\bsteel\b|\bmetal\b/.test(text)) {
+    return "steel_fabrication";
+  }
+  if (/\bpipe\b|\bupvc\b|\bpvc\b|\bdrain\b|\bgully\b|\btrap\b|\belbow\b|\btee\b|\bbranch\b|\bjunction\b|\bsleeve\b|\bconnector\b|\bbend\b/.test(text)) {
+    if (/\belbow\b|\btee\b|\bbranch\b|\bjunction\b|\bsleeve\b|\bconnector\b|\bbend\b|\btrap\b|\bgully\b/.test(text)) {
+      return "pipe_fitting";
+    }
+    return "pipe_run";
+  }
+  if (/\bdoor\b|\bframe\b|\blouvre\b|\bironmongery\b|\bwindow\b/.test(text)) return "doors_windows";
+  if (/\bceiling mounted\b|\blight point\b|\blight fitting\b|\bswitch\b|\bsocket\b|\boutlet\b|\bphotocell\b|\belectrical\b/.test(text)) {
+    return "electrical_fixture";
+  }
+  if (/\bpaint\b|\bplaster\b|\brender\b|\bscreed\b|\btiling\b|\bfloor finish\b/.test(text)) return "finishes";
+  if (/\bconcrete\b|\breinforcement\b|\bformwork\b|\bfoundation\b|\bbases\b|\bcolumns\b|\bsurface bed\b|\bmesh\b/.test(text)) {
+    return "concrete_structure";
+  }
+  if (/\bexcavat\b|\bbackfill\b|\btrench\b|\bhardcore\b|\bcompacting\b|\blevelling\b|\brock\b/.test(text)) {
+    return "earthworks";
+  }
+  return "other";
+}
 
-  const rateMap = new Map<string, { rate: number | null; amount: number | null }>();
-  for (const r of result.items ?? []) {
-    if (r.item_key) rateMap.set(r.item_key, { rate: r.rate ?? null, amount: r.amount ?? null });
+function requiresLocalPrecedent(category: BOQPricingCategory): boolean {
+  return (
+    category === "ditto_reference" ||
+    category === "pipe_fitting" ||
+    category === "steel_fabrication" ||
+    category === "treatment_service"
+  );
+}
+
+function defaultSkipReason(category: BOQPricingCategory): BOQRateSkipReason {
+  if (category === "ditto_reference") return "ditto_without_parent";
+  return "specialist_item_requires_local_precedent";
+}
+
+function normalizeDescriptionForSimilarity(description: string): string {
+  return description
+    .toLowerCase()
+    .replace(/\bditto\b/g, " ")
+    .replace(/\bincluding\b/g, " ")
+    .replace(/\bincl\b/g, " ")
+    .replace(/\bas described\b/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function descriptionSimilarity(a: string, b: string): number {
+  const tokensA = new Set(normalizeDescriptionForSimilarity(a).split(" ").filter(Boolean));
+  const tokensB = new Set(normalizeDescriptionForSimilarity(b).split(" ").filter(Boolean));
+  if (tokensA.size === 0 || tokensB.size === 0) return 0;
+  let intersection = 0;
+  for (const token of tokensA) {
+    if (tokensB.has(token)) intersection += 1;
+  }
+  return intersection / Math.max(tokensA.size, tokensB.size);
+}
+
+function summarizeRateQuality(
+  boq: BOQDocument,
+  metrics: {
+    localMatches: number;
+    aiMatches: number;
+    unresolved: number;
+    outliers: number;
+  }
+): BOQQualitySummary {
+  let totalItems = 0;
+  let qtyWithEvidence = 0;
+  let qtyMissing = 0;
+  let lowConfidence = 0;
+  let rateFilled = 0;
+  let rateMissing = 0;
+
+  for (const bill of boq.bills) {
+    for (const item of bill.items) {
+      if (item.is_header) continue;
+      totalItems += 1;
+      if (item.qty == null) qtyMissing += 1;
+      if (item.qty != null && item.source_excerpt && item.source_excerpt.trim().length >= 12) {
+        qtyWithEvidence += 1;
+      }
+      if ((item.quantity_confidence ?? 0.4) < 0.6) lowConfidence += 1;
+      if (item.rate == null) rateMissing += 1;
+      else rateFilled += 1;
+    }
   }
 
   return {
+    total_items: totalItems,
+    qty_with_evidence: qtyWithEvidence,
+    qty_missing: qtyMissing,
+    low_confidence: lowConfidence,
+    rate_filled: rateFilled,
+    rate_missing: rateMissing,
+    mapped_rows: boq.workbook_preservation?.mapped_item_rows,
+    ambiguous_rows: boq.workbook_preservation?.ambiguous_item_rows ?? 0,
+    outlier_rows: metrics.outliers,
+  };
+}
+
+async function fillRatesPass(
+  boq: BOQDocument,
+  options?: { rateContext?: RateContext }
+): Promise<BOQDocument> {
+  const contextBlock = options?.rateContext ? `\n\n${buildRateContextBlock(options.rateContext)}` : "";
+  const existingRates = boq.bills.flatMap((bill) =>
+    bill.items
+      .filter((item) => !item.is_header && item.rate !== null)
+      .map((item) => ({
+        description: item.description,
+        unit: item.unit,
+        rate: item.rate!,
+        bill: bill.title,
+      }))
+  );
+
+  const exactRateMap = new Map<string, number[]>();
+  const unitRateMap = new Map<string, number[]>();
+  for (const rateRow of existingRates) {
+    const key = normalizeRateKey(rateRow.description, rateRow.unit);
+    exactRateMap.set(key, [...(exactRateMap.get(key) ?? []), rateRow.rate]);
+    const unitKey = normalizeRateKey(rateRow.unit, "");
+    unitRateMap.set(unitKey, [...(unitRateMap.get(unitKey) ?? []), rateRow.rate]);
+  }
+
+  let localMatches = 0;
+  let gatedSpecialistRows = 0;
+  const billLocalRates = new Map<string, Array<{ description: string; unit: string; rate: number }>>();
+  const unresolvedItems: Array<{
+    item_key: string;
+    description: string;
+    unit: string;
+    qty: number | null;
+    bill: string;
+    workbook_context: string | null;
+  }> = [];
+
+  const locallyFilledBoq: BOQDocument = {
     ...boq,
     bills: boq.bills.map((bill) => ({
       ...bill,
       items: bill.items.map((item) => {
         if (item.is_header || item.rate !== null) return item;
+        const pricingCategory = classifyPricingCategory(item.description, item.unit);
+        const key = normalizeRateKey(item.description, item.unit);
+        const exactMatches = exactRateMap.get(key) ?? [];
+        let matchedRate = median(exactMatches);
+        let matchReason = "Reused an exact matching rate from another row in the uploaded workbook.";
+
+        const billKey = `${normalizeRateKey(bill.title, "")}::${normalizeRateKey(item.workbook_context ?? "", "")}`;
+        const priorBillRates = billLocalRates.get(billKey) ?? [];
+
+        if (matchedRate === null && pricingCategory === "ditto_reference") {
+          const inherited = [...priorBillRates]
+            .reverse()
+            .find((candidate) => candidate.unit === item.unit || !item.unit || !candidate.unit);
+          if (inherited) {
+            matchedRate = inherited.rate;
+            matchReason = "Inherited the nearest safe local rate for a ditto/reference row in the same bill section.";
+          }
+        }
+
+        if (matchedRate === null && !requiresLocalPrecedent(pricingCategory)) {
+          const nearDuplicate = priorBillRates.find((candidate) =>
+            candidate.unit === item.unit &&
+            descriptionSimilarity(candidate.description, item.description) >= 0.72
+          );
+          if (nearDuplicate) {
+            matchedRate = nearDuplicate.rate;
+            matchReason = "Reused a near-duplicate rate from the same bill section.";
+          }
+        }
+
+        if (matchedRate === null && requiresLocalPrecedent(pricingCategory)) {
+          gatedSpecialistRows += 1;
+          return {
+            ...item,
+            pricing_category: pricingCategory,
+            rate_skip_reason: defaultSkipReason(pricingCategory) as BOQRateSkipReason,
+            rate_source_detail:
+              pricingCategory === "ditto_reference"
+                ? "Skipped auto-pricing because this ditto/reference row has no safe local parent rate."
+                : "Skipped auto-pricing because this specialist item needs workbook-local precedent.",
+          };
+        }
+        if (matchedRate === null) {
+          unresolvedItems.push({
+            item_key: item.item_key ?? `${item.item_no || item.description.slice(0, 20)}`,
+            description: item.description,
+            unit: item.unit,
+            qty: item.qty,
+            bill: bill.title,
+            workbook_context: item.workbook_context ?? null,
+          });
+          return item;
+        }
+
+        localMatches += 1;
+        const nextBillRates = billLocalRates.get(billKey) ?? [];
+        nextBillRates.push({ description: item.description, unit: item.unit, rate: matchedRate });
+        billLocalRates.set(billKey, nextBillRates);
+        return {
+          ...item,
+          pricing_category: pricingCategory,
+          rate: matchedRate,
+          amount: item.qty !== null ? +(item.qty * matchedRate).toFixed(2) : null,
+          rate_source: "workbook_local_pattern",
+          rate_source_detail: matchReason,
+          rate_confidence: 0.95,
+          rate_skip_reason: null,
+        };
+      }),
+    })),
+  };
+
+  if (unresolvedItems.length === 0) {
+    return {
+      ...locallyFilledBoq,
+      workbook_preservation: locallyFilledBoq.workbook_preservation
+        ? {
+            ...locallyFilledBoq.workbook_preservation,
+            workbook_local_rate_matches:
+              (locallyFilledBoq.workbook_preservation.workbook_local_rate_matches ?? 0) + localMatches,
+            unresolved_rate_rows: locallyFilledBoq.bills
+              .flatMap((bill) => bill.items)
+              .filter((item) => !item.is_header && item.rate === null).length,
+          }
+        : undefined,
+    };
+  }
+
+  const rateMap = new Map<string, {
+    rate: number | null;
+    amount: number | null;
+    source_category?: string | null;
+    rationale?: string | null;
+    confidence?: number | null;
+  }>();
+
+  for (const batch of chunkArray(unresolvedItems, RATE_FILL_BATCH_SIZE)) {
+    const result = await generateStructuredContent<{
+      items: Array<{
+        item_key: string;
+        rate: number | null;
+        amount: number | null;
+        source_category?: string | null;
+        rationale?: string | null;
+        confidence?: number | null;
+      }>
+    }>({
+      preferredModel: RATE_PRIMARY_MODEL,
+      modelCandidates: RATE_MODEL_CANDIDATES,
+      responseSchema: RATES_SCHEMA,
+      temperature: 0.1,
+      systemInstruction: `You are a quantity surveyor estimating rates for a Zambian construction BOQ.\n\n${RATES_INSTRUCTION}${contextBlock}
+
+RATE PROVENANCE RULES:
+1. Prefer existing workbook pricing conventions when similar items already have rates.
+2. Prefer project-consistent rates across repeated or "Ditto" items in the same bill/section.
+3. Use embedded market heuristics only when workbook-local evidence is not sufficient.
+4. Return source_category as one of: embedded_market_heuristic, workbook_local_pattern, project_consistency_inference, external_reference_document.
+5. Return a short rationale and confidence between 0 and 1 for every filled rate.`,
+      prompt: `Estimate ZMW rates for the following BOQ items. Return rate, amount, source_category, rationale, and confidence for each item_key.
+
+Existing workbook rates:
+${JSON.stringify(buildExistingRateReferences(existingRates, batch))}
+
+Items to fill:
+${JSON.stringify(batch)}`,
+    });
+
+    for (const r of result.items ?? []) {
+      if (r.item_key) {
+        rateMap.set(r.item_key, {
+          rate: r.rate ?? null,
+          amount: r.amount ?? null,
+          source_category: r.source_category ?? null,
+          rationale: r.rationale ?? null,
+          confidence: r.confidence ?? null,
+        });
+      }
+    }
+  }
+
+  let aiMatches = 0;
+  let outlierMatches = 0;
+
+  const filled = {
+    ...locallyFilledBoq,
+    bills: locallyFilledBoq.bills.map((bill) => ({
+      ...bill,
+      items: bill.items.map((item) => {
+        if (item.is_header || item.rate !== null) return item;
+        const pricingCategory = classifyPricingCategory(item.description, item.unit);
         const itemKey = item.item_key ?? `${item.item_no || item.description.slice(0, 20)}`;
         const rateData = rateMap.get(itemKey);
         if (!rateData) return item;
         const rate = rateData.rate ?? null;
+        if (rate === null) return item;
+
+        const unitMedian = median(unitRateMap.get(normalizeRateKey(item.unit, "")) ?? []);
+        if (unitMedian !== null && (rate < unitMedian * 0.15 || rate > unitMedian * 6)) {
+          outlierMatches += 1;
+          return {
+            ...item,
+            pricing_category: pricingCategory,
+            rate_skip_reason: "ai_outlier_rejected" as BOQRateSkipReason,
+            rate_source_detail:
+              "Skipped AI rate because it looked like an outlier against other workbook rates with the same unit.",
+          };
+        }
+
         const qty = item.qty;
         const amount = rateData.amount ?? (rate !== null && qty !== null ? +(qty * rate).toFixed(2) : null);
-        return { ...item, rate, amount };
+        aiMatches += 1;
+        return {
+          ...item,
+          pricing_category: pricingCategory,
+          rate,
+          amount,
+          rate_source: (rateData.source_category as BOQItem["rate_source"]) ?? "embedded_market_heuristic",
+          rate_source_detail: rateData.rationale ?? null,
+          rate_confidence: rateData.confidence ?? null,
+          rate_skip_reason: null,
+        };
       }),
     })),
+  };
+
+  return {
+    ...filled,
+    workbook_preservation: filled.workbook_preservation
+      ? {
+          ...filled.workbook_preservation,
+          workbook_local_rate_matches:
+            (filled.workbook_preservation.workbook_local_rate_matches ?? 0) + localMatches,
+          ai_priced_rows: (filled.workbook_preservation.ai_priced_rows ?? 0) + aiMatches,
+          outlier_rate_rows: (filled.workbook_preservation.outlier_rate_rows ?? 0) + outlierMatches,
+          unresolved_rate_rows: filled.bills
+            .flatMap((bill) => bill.items)
+            .filter((item) => !item.is_header && item.rate === null).length,
+          ambiguous_item_rows: (filled.workbook_preservation.ambiguous_item_rows ?? 0) + gatedSpecialistRows,
+        }
+      : undefined,
   };
 }
 
@@ -1093,76 +1916,62 @@ SITE-SPECIFIC CONTEXT — adjust all rates accordingly:
 Apply these adjustments consistently across all items. Transport-sensitive items (materials, concrete, steel) are most affected by accessibility.`.trim();
 }
 
-/**
- * Parses an Excel BOQ (provided as CSV text) and fills missing rates
- * using Zambian construction market rates, optionally adjusted for site context.
- */
-export async function fillBOQRates(csvText: string, rateContext?: RateContext): Promise<BOQDocument> {
-  const contextBlock = rateContext ? `\n\n${buildRateContextBlock(rateContext)}` : "";
-  const truncated = csvText.length > 60000 ? csvText.slice(0, 60000) + "\n...[truncated]" : csvText;
-
-  const raw = await generateStructuredContent<BOQDocument>({
-    preferredModel: FALLBACK_MODEL,
-    responseSchema: BOQ_DOCUMENT_SCHEMA,
-    temperature: 0.1,
-    thinkingBudget: 8000,
-    systemInstruction: `You are a senior quantity surveyor parsing an Excel Bill of Quantities and filling missing rates.
-
-${RATES_INSTRUCTION}${contextBlock}
-
-PARSING RULES:
-1. Parse the spreadsheet data into a structured BOQDocument JSON.
-2. Preserve ALL items from the spreadsheet — do not drop any rows.
-3. Preserve existing quantities, units, and descriptions verbatim.
-4. Preserve any existing rates and amounts that are already filled in.
-5. Fill in rates for items that have a quantity but no rate, using the Zambian market rates above.
-6. Group items into bills based on the section headers in the spreadsheet.
-7. If no section structure is visible, put all items into a single bill.
-8. Set is_header=true for section header rows (rows with no qty/unit/rate).
-9. Infer project name, location, and date from the spreadsheet if present; otherwise use reasonable placeholders.`,
-    prompt: `Parse this BOQ spreadsheet and fill missing rates:\n\n${truncated}`,
-  });
-
-  // Normalise and ensure amounts are computed
+export async function fillMissingRatesInExistingBOQ(
+  boq: BOQDocument,
+  rateContext?: RateContext
+): Promise<BOQDocument> {
+  const filled = await fillRatesPass(boq, { rateContext });
+  const workbookPreservation = filled.workbook_preservation
+    ? {
+        ...filled.workbook_preservation,
+        unresolved_rate_rows:
+          filled.bills.flatMap((bill) => bill.items).filter((item) => !item.is_header && item.rate === null).length,
+      }
+    : undefined;
+  const workbookLocalRateMatches = workbookPreservation?.workbook_local_rate_matches ?? 0;
+  const aiPricedRows = workbookPreservation?.ai_priced_rows ?? 0;
+  const outlierRateRows = workbookPreservation?.outlier_rate_rows ?? 0;
   return {
-    project: raw.project || "Uploaded BOQ",
-    location: raw.location || "Zambia",
-    prepared_by: raw.prepared_by || "BOQ Generator",
-    date: raw.date || new Date().toISOString().slice(0, 10),
-    bills: (raw.bills ?? []).map((bill, billIdx) => ({
-      number: bill.number ?? billIdx + 1,
-      title: bill.title || `Bill ${billIdx + 1}`,
-      items: (bill.items ?? []).map((item) => {
-        const qty = typeof item.qty === "number" && isFinite(item.qty) && item.qty > 0 ? item.qty : null;
-        const rate = typeof item.rate === "number" && isFinite(item.rate) && item.rate > 0 ? item.rate : null;
-        const amount = typeof item.amount === "number" && isFinite(item.amount) && item.amount > 0
-          ? item.amount
-          : (qty !== null && rate !== null ? +(qty * rate).toFixed(2) : null);
-        return {
-          item_no: item.item_no ?? "",
-          description: item.description || "Unspecified item",
-          unit: item.unit || "Item",
-          qty,
-          rate,
-          amount,
-          is_header: item.is_header ?? false,
-          note: item.note ?? undefined,
-        };
-      }),
-    })),
-    pipeline_version: "excel-rate-v1.0",
+    ...filled,
+    pipeline_version: "excel-rate-v2.0",
+    rate_reference: buildDefaultRateReference(),
+    workbook_preservation: workbookPreservation,
+    quality_summary: summarizeRateQuality(filled, {
+      localMatches: workbookLocalRateMatches,
+      aiMatches: aiPricedRows,
+      unresolved: workbookPreservation?.unresolved_rate_rows ?? 0,
+      outliers: outlierRateRows,
+    }),
   };
 }
 
 export async function generateBOQ(
-  sowText: string,
-  opts?: { suggestRates?: boolean }
+  input: string | GenerationInputBundle,
+  opts?: {
+    suggestRates?: boolean;
+    documentClassification?: DocumentClassification;
+  }
 ): Promise<BOQDocument> {
-  const structureRaw = await generateStructure(sowText, false);
+  const documents =
+    typeof input === "string"
+      ? [
+          {
+            document_id: "primary",
+            name: "Primary SOW",
+            role: "primary" as const,
+            document_type: "construction_sow" as const,
+            text: input,
+            pages: null,
+          },
+        ]
+      : input.documents;
+  const bundleText = buildPromptBundle(documents);
+
+  const structureRaw = await generateStructure(bundleText, false);
   let structure = normalizeStructure(structureRaw);
 
   if (countNonHeaderItems(structure) === 0) {
-    const retryRaw = await generateStructure(sowText, true);
+    const retryRaw = await generateStructure(bundleText, true);
     structure = normalizeStructure(retryRaw);
   }
 
@@ -1172,8 +1981,26 @@ export async function generateBOQ(
     );
   }
 
-  const quantitiesRaw = await extractQuantities(sowText, structure);
-  const boq = mergeStructureAndQuantities(structure, quantitiesRaw);
+  const quantitiesRaw = applyDrawingCountHeuristics(
+    structure,
+    await extractQuantities(bundleText, structure),
+    documents
+  );
+  const boq = mergeStructureAndQuantities(
+    structure,
+    quantitiesRaw,
+    opts?.documentClassification
+      ? {
+          ...opts.documentClassification,
+          source_bundle_status:
+            opts.documentClassification.required_attachments.length > 0 &&
+            supportingDocsSatisfyRequirements(documents, opts.documentClassification.required_attachments)
+              ? "complete"
+              : opts.documentClassification.source_bundle_status,
+        }
+      : undefined,
+    buildSourceBundle(documents)
+  );
   if (opts?.suggestRates) {
     return fillRatesPass(boq);
   }
@@ -1182,7 +2009,9 @@ export async function generateBOQ(
 
 function mergeStructureAndQuantities(
   structure: BOQStructureArtifact,
-  quantities: QuantityPassResponse
+  quantities: QuantityPassResponse,
+  documentClassification?: DocumentClassification,
+  sourceBundle?: SourceBundleDocument[]
 ): BOQDocument {
   const quantityMap = new Map<string, BOQQuantityArtifactItem>();
   for (const item of quantities.items ?? []) {
@@ -1195,6 +2024,9 @@ function mergeStructureAndQuantities(
       quantity_confidence: normalizeConfidence(item.quantity_confidence),
       source_excerpt: safeNullableText(item.source_excerpt),
       source_anchor: safeNullableText(item.source_anchor),
+      source_document: safeNullableText(item.source_document),
+      evidence_type: normalizeEvidenceType(item.evidence_type, item.source_excerpt, item.qty),
+      derivation_note: safeNullableText(item.derivation_note),
       note: safeNullableText(item.note) ?? undefined,
     });
   }
@@ -1208,79 +2040,112 @@ function mergeStructureAndQuantities(
   const bills = structure.bills.map((bill) => ({
     number: bill.number,
     title: bill.title,
-    items: bill.items.map((baseItem): BOQItem => {
-      if (baseItem.is_header) {
-        return {
+    items: (() => {
+      const mergedItems: BOQItem[] = [];
+      let currentSection: string | null = null;
+
+      for (const baseItem of bill.items) {
+        if (!baseItem.is_header && baseItem.section_context) {
+          const normalizedSection = safeText(baseItem.section_context, "").trim();
+          if (normalizedSection && normalizedSection !== currentSection) {
+            currentSection = normalizedSection;
+            mergedItems.push({
+              item_key: `${baseItem.item_key}_section`,
+              item_no: "",
+              description: normalizedSection,
+              unit: "",
+              qty: null,
+              rate: null,
+              amount: null,
+              is_header: true,
+            });
+          }
+        }
+
+        if (baseItem.is_header) {
+          currentSection = baseItem.description;
+          mergedItems.push({
+            item_key: baseItem.item_key,
+            item_no: "",
+            description: baseItem.description,
+            unit: "",
+            qty: null,
+            rate: null,
+            amount: null,
+            is_header: true,
+          });
+          continue;
+        }
+
+        totalItems += 1;
+        const q = quantityMap.get(baseItem.item_key);
+        let qty = q?.qty ?? null;
+        let source = q?.quantity_source ?? "assumed";
+        const confidence = q?.quantity_confidence ?? 0.4;
+        const excerpt = q?.source_excerpt ?? null;
+        const anchor = q?.source_anchor ?? null;
+        const sourceDocument = q?.source_document ?? null;
+
+        if (qty !== null && !hasSufficientEvidence(excerpt)) {
+          validationFlags.push({
+            item_key: baseItem.item_key,
+            issue: "missing_evidence",
+            severity: "warning",
+            code: "QTY_EVIDENCE_REQUIRED",
+            message: "Quantity removed because supporting source evidence was missing.",
+          });
+          qty = null;
+          source = "assumed";
+        }
+
+        if (q?.qty != null && qty === null) {
+          validationFlags.push({
+            item_key: baseItem.item_key,
+            issue: "invalid_quantity",
+            severity: "warning",
+            code: "QTY_INVALID_VALUE",
+            message: "Invalid quantity value was discarded.",
+          });
+        }
+
+        if (qty === null) {
+          qtyMissing += 1;
+          validationFlags.push({
+            item_key: baseItem.item_key,
+            issue: "missing_quantity",
+            severity: "info",
+            code: "QTY_UNRESOLVED",
+            message: "Quantity is unresolved and requires manual review.",
+          });
+        } else if (hasSufficientEvidence(excerpt)) {
+          qtyWithEvidence += 1;
+        }
+
+        if (confidence < 0.6) {
+          lowConfidence += 1;
+        }
+
+        mergedItems.push({
           item_key: baseItem.item_key,
-          item_no: "",
+          item_no: baseItem.item_no,
           description: baseItem.description,
-          unit: "",
-          qty: null,
+          unit: normalizeUnit(q?.unit || baseItem.unit),
+          qty,
           rate: null,
           amount: null,
-          is_header: true,
-        };
-      }
-
-      totalItems += 1;
-      const q = quantityMap.get(baseItem.item_key);
-      let qty = q?.qty ?? null;
-      let source = q?.quantity_source ?? "assumed";
-      const confidence = q?.quantity_confidence ?? 0.4;
-      const excerpt = q?.source_excerpt ?? null;
-      const anchor = q?.source_anchor ?? null;
-
-      if (qty !== null && !hasSufficientEvidence(excerpt)) {
-        validationFlags.push({
-          item_key: baseItem.item_key,
-          issue: "missing_evidence",
-          severity: "warning",
-          message: "Quantity removed because supporting source evidence was missing.",
-        });
-        qty = null;
-        source = "assumed";
-      }
-
-      if (q?.qty != null && qty === null) {
-        validationFlags.push({
-          item_key: baseItem.item_key,
-          issue: "invalid_quantity",
-          severity: "warning",
-          message: "Invalid quantity value was discarded.",
+          quantity_source: source,
+          quantity_confidence: confidence,
+          source_excerpt: excerpt,
+          source_anchor: anchor,
+          source_document: sourceDocument,
+          evidence_type: q?.evidence_type ?? "missing",
+          derivation_note: q?.derivation_note ?? null,
+          note: q?.note ?? baseItem.note,
         });
       }
 
-      if (qty === null) {
-        qtyMissing += 1;
-        validationFlags.push({
-          item_key: baseItem.item_key,
-          issue: "missing_quantity",
-          severity: "info",
-          message: "Quantity is unresolved and requires manual review.",
-        });
-      } else if (hasSufficientEvidence(excerpt)) {
-        qtyWithEvidence += 1;
-      }
-
-      if (confidence < 0.6) {
-        lowConfidence += 1;
-      }
-
-      return {
-        item_key: baseItem.item_key,
-        item_no: baseItem.item_no,
-        description: baseItem.description,
-        unit: normalizeUnit(q?.unit || baseItem.unit),
-        qty,
-        rate: null,
-        amount: null,
-        quantity_source: source,
-        quantity_confidence: confidence,
-        source_excerpt: excerpt,
-        source_anchor: anchor,
-        note: q?.note ?? baseItem.note,
-      };
-    }),
+      return mergedItems;
+    })(),
   }));
 
   const qualitySummary: BOQQualitySummary = {
@@ -1288,6 +2153,13 @@ function mergeStructureAndQuantities(
     qty_with_evidence: qtyWithEvidence,
     qty_missing: qtyMissing,
     low_confidence: lowConfidence,
+    semantic_risk_items: bills
+      .flatMap((bill) => bill.items)
+      .filter((item) => !item.is_header && item.evidence_type === "missing").length,
+    evidence_coverage_ratio:
+      totalItems > 0 ? Number((qtyWithEvidence / totalItems).toFixed(2)) : 0,
+    source_bundle_status: documentClassification?.source_bundle_status ?? "complete",
+    missing_required_attachments: documentClassification?.required_attachments.length ?? 0,
   };
 
   const artifacts: BOQArtifacts = {
@@ -1302,7 +2174,9 @@ function mergeStructureAndQuantities(
     prepared_by: structure.prepared_by,
     date: structure.date,
     bills,
-    pipeline_version: "quantity-v1.0",
+    pipeline_version: "quantity-v2.0",
+    document_classification: documentClassification,
+    source_bundle: sourceBundle,
     quality_summary: qualitySummary,
     artifacts,
   };
@@ -1359,6 +2233,25 @@ function normalizeConfidence(confidence: number | null | undefined): number {
   if (confidence < 0) return 0;
   if (confidence > 1) return 1;
   return Number(confidence.toFixed(2));
+}
+
+function normalizeEvidenceType(
+  evidenceType: string | BOQEvidenceType | null | undefined,
+  excerpt: string | null | undefined,
+  qty: number | null
+): BOQEvidenceType {
+  const clean = (evidenceType ?? "").toLowerCase();
+  if (
+    clean === "quoted_scope" ||
+    clean === "tabulated_scope" ||
+    clean === "derived_calculation" ||
+    clean === "metadata_only" ||
+    clean === "missing"
+  ) {
+    return clean;
+  }
+  if (qty == null || !excerpt?.trim()) return "missing";
+  return "quoted_scope";
 }
 
 export function hasSufficientEvidence(excerpt: string | null): boolean {

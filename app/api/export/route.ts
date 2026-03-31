@@ -1,3 +1,4 @@
+import { logger } from "@/lib/logger";
 import { NextRequest, NextResponse } from "next/server";
 import { generateBOQExcel } from "@/lib/excel";
 import type { BOQDocument } from "@/lib/types";
@@ -26,7 +27,7 @@ export async function POST(req: NextRequest) {
       },
     });
   } catch (err) {
-    console.error("Excel export error:", err);
+    logger.error("Excel export error", { error: err instanceof Error ? err.message : String(err), route: "export" });
     return NextResponse.json({ error: "Failed to generate Excel file" }, { status: 500 });
   }
 }

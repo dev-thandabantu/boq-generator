@@ -1,13 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
+import { ensureProfileExists } from "@/lib/supabase/ensure-profile";
 import { getStripe } from "@/lib/stripe";
-import { fillBOQRates, RateContext } from "@/lib/claude";
-import { excelToCSV } from "@/lib/excel";
+import { fillMissingRatesInExistingBOQ, RateContext } from "@/lib/claude";
+import { extractWorkbookBOQ } from "@/lib/excel";
+import { logger } from "@/lib/logger";
+import { trackEvent } from "@/lib/analytics";
+import type { PostgrestError } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const STORAGE_BUCKET = "boq-generator-dev";
+const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET ?? "boq-generator-dev";
+
+function isMissingColumnError(error: PostgrestError | null, columns: string[]): boolean {
+  if (!error) return false;
+  const haystack = [error.message, error.details, error.hint, error.code].filter(Boolean).join(" ").toLowerCase();
+  return columns.some((column) => haystack.includes(column.toLowerCase()));
+}
+
+function isDuplicateStripeSessionError(error: PostgrestError | null): boolean {
+  if (!error) return false;
+  const haystack = [error.message, error.details, error.hint, error.code].filter(Boolean).join(" ").toLowerCase();
+  return (
+    error.code === "23505" &&
+    (haystack.includes("stripe_session_id") || haystack.includes("boqs_stripe_session_id_key"))
+  );
+}
 
 function classifyError(message: string): { status: number; safeMessage: string } {
   const lower = message.toLowerCase();
@@ -15,10 +34,16 @@ function classifyError(message: string): { status: number; safeMessage: string }
     return { status: 429, safeMessage: "AI rate limit reached. Please wait a minute and try again." };
   }
   if (
+    lower.includes("fetch failed") ||
+    lower.includes("502") || lower.includes("bad gateway") ||
     lower.includes("503") || lower.includes("service unavailable") ||
-    lower.includes("timeout") || lower.includes("etimedout") || lower.includes("econnreset")
+    lower.includes("timeout") || lower.includes("etimedout") || lower.includes("econnreset") ||
+    lower.includes("econnrefused") || lower.includes("enotfound") || lower.includes("network")
   ) {
-    return { status: 503, safeMessage: "AI service is temporarily busy. Please try again in a moment." };
+    return {
+      status: 503,
+      safeMessage: "AI service is temporarily unavailable or the Gemini request could not be reached. Please try again in a moment.",
+    };
   }
   return { status: 500, safeMessage: "Rate filling failed. Please try again." };
 }
@@ -48,6 +73,7 @@ export async function POST(req: NextRequest) {
     const storageKey = metadata.storage_key;
     const rateColHeader = metadata.rate_col_header ?? "";
     const amountColHeader = metadata.amount_col_header ?? "";
+    const boqId = metadata.boq_id ?? null;
 
     if (!storageKey) {
       return NextResponse.json({ error: "Missing storage key in payment session" }, { status: 400 });
@@ -61,8 +87,9 @@ export async function POST(req: NextRequest) {
     }
 
     const serviceClient = createServiceClient();
+    await ensureProfileExists(serviceClient, user);
 
-    // Idempotency: if this Stripe session already produced a BOQ, return it
+    // Idempotency: if this Stripe session already produced a paid BOQ, return it
     const { data: existingBoq } = await serviceClient
       .from("boqs")
       .select("id, data")
@@ -79,41 +106,126 @@ export async function POST(req: NextRequest) {
       .download(storageKey);
 
     if (downloadError || !fileData) {
-      console.error("Storage download error:", downloadError);
+      logger.error("Storage download error", { error: String(downloadError), route: "rate-boq" });
       return NextResponse.json(
         { error: "Could not retrieve your uploaded file. Please try again." },
         { status: 500 }
       );
     }
 
-    // Convert to CSV and fill rates via Gemini
+    // Parse the original workbook deterministically, then fill only missing rates.
     const arrayBuffer = await fileData.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
-    const csvText = excelToCSV(buffer);
-
-    const truncated = csvText.length > 60000 ? csvText.slice(0, 60000) + "\n...[truncated]" : csvText;
-    const boq = await fillBOQRates(truncated, rate_context);
+    const workbookBoq = extractWorkbookBOQ(buffer, {
+      rateColumnHeader: rateColHeader || null,
+      amountColumnHeader: amountColHeader || null,
+    });
+    const boq = await fillMissingRatesInExistingBOQ(workbookBoq, rate_context);
 
     const title = boq.project || "Rated BOQ";
+    const itemCount = boq.bills?.flatMap((b) => b.items).filter((i) => !i.is_header).length ?? 0;
 
-    // Save BOQ to database
-    const { data: saved, error: dbError } = await serviceClient
-      .from("boqs")
-      .insert({
-        user_id: user.id,
-        title,
-        data: boq,
-        stripe_session_id: session_id,
-        source_excel_key: storageKey,
-        rate_col_header: rateColHeader || null,
-        amount_col_header: amountColHeader || null,
-      })
-      .select("id")
-      .single();
+    let savedId: string;
 
-    if (dbError) {
-      console.error("Failed to save rated BOQ:", dbError);
-      return NextResponse.json({ boq, boq_id: null });
+    if (boqId) {
+      // New flow: UPDATE the preview BOQ row created by ingest-boq
+      const { data: updated, error: updateError } = await serviceClient
+        .from("boqs")
+        .update({
+          title,
+          data: boq,
+          stripe_session_id: session_id,
+          source_excel_key: storageKey,
+          payment_status: "paid",
+          rate_col_header: rateColHeader || null,
+          amount_col_header: amountColHeader || null,
+        })
+        .eq("id", boqId)
+        .eq("user_id", user.id)
+        .select("id")
+        .single();
+
+      if (updateError || !updated) {
+        logger.error("Failed to update preview BOQ with rates", { error: String(updateError), boqId, route: "rate-boq" });
+        return NextResponse.json({ boq, boq_id: null });
+      }
+      savedId = updated.id;
+    } else {
+      // Legacy flow: INSERT a new BOQ row (no boq_id in metadata)
+      let { data: saved, error: dbError } = await serviceClient
+        .from("boqs")
+        .insert({
+          user_id: user.id,
+          title,
+          data: boq,
+          stripe_session_id: session_id,
+          source_excel_key: storageKey,
+          rate_col_header: rateColHeader || null,
+          amount_col_header: amountColHeader || null,
+          payment_status: "paid",
+        })
+        .select("id")
+        .single();
+
+      if (isMissingColumnError(dbError, ["source_excel_key", "rate_col_header", "amount_col_header"])) {
+        logger.warn("Rate BOQ metadata columns missing; retrying save without Excel metadata", {
+          code: dbError?.code,
+          message: dbError?.message,
+          details: dbError?.details,
+          hint: dbError?.hint,
+          route: "rate-boq",
+        });
+
+        ({ data: saved, error: dbError } = await serviceClient
+          .from("boqs")
+          .insert({
+            user_id: user.id,
+            title,
+            data: boq,
+            stripe_session_id: session_id,
+            payment_status: "paid",
+          })
+          .select("id")
+          .single());
+      }
+
+      if (dbError) {
+        if (isDuplicateStripeSessionError(dbError)) {
+          logger.warn("Duplicate rate-boq save detected; loading existing row", {
+            code: dbError.code,
+            message: dbError.message,
+            details: dbError.details,
+            route: "rate-boq",
+          });
+
+          const { data: concurrentBoq } = await serviceClient
+            .from("boqs")
+            .select("id, data")
+            .eq("stripe_session_id", session_id)
+            .maybeSingle();
+
+          if (concurrentBoq?.id) {
+            return NextResponse.json({ boq: concurrentBoq.data, boq_id: concurrentBoq.id });
+          }
+        }
+
+        logger.error("Failed to save rated BOQ", {
+          error: String(dbError),
+          code: dbError.code,
+          message: dbError.message,
+          details: dbError.details,
+          hint: dbError.hint,
+          route: "rate-boq",
+        });
+        return NextResponse.json({ boq, boq_id: null });
+      }
+
+      if (!saved?.id) {
+        logger.error("Rated BOQ save returned no row id", { route: "rate-boq" });
+        return NextResponse.json({ boq, boq_id: null });
+      }
+
+      savedId = saved.id;
     }
 
     // Record payment
@@ -122,17 +234,18 @@ export async function POST(req: NextRequest) {
         stripe_session_id: session_id,
         stripe_payment_intent: stripeSession.payment_intent as string | null,
         user_id: user.id,
-        amount_cents: stripeSession.amount_total ?? 10000,
+        amount_cents: stripeSession.amount_total ?? 2000,
         currency: stripeSession.currency ?? "usd",
         status: "completed",
-        boq_id: saved.id,
+        boq_id: savedId,
       },
       { onConflict: "stripe_session_id", ignoreDuplicates: false }
     );
 
-    return NextResponse.json({ boq, boq_id: saved.id });
+    trackEvent(user.id, "boq_rated", { boqId: savedId, itemCount, storageKey });
+    return NextResponse.json({ boq, boq_id: savedId });
   } catch (err) {
-    console.error("rate-boq error:", err);
+    logger.error("rate-boq error", { error: err instanceof Error ? err.message : String(err), route: "rate-boq" });
     const message = err instanceof Error ? err.message : "Unknown error";
     const classified = classifyError(message);
     return NextResponse.json({ error: classified.safeMessage }, { status: classified.status });

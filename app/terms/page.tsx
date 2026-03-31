@@ -36,7 +36,7 @@ export default function TermsPage() {
 
         <Section title="3. Payment">
           <ul className="list-disc pl-5 space-y-1 text-sm">
-            <li>The Service charges a one-time fee of <strong className="text-white">USD $100</strong> per BOQ generation.</li>
+            <li>The Service charges a one-time fee per BOQ, ranging from <strong className="text-white">USD $20 to $500</strong> based on the estimated value of the generated Bill of Quantities.</li>
             <li>Payment is processed securely by Stripe. By completing payment, you authorise this charge.</li>
             <li>Prices are shown in USD and are exclusive of any local taxes that may apply in your jurisdiction.</li>
             <li>Your payment is non-refundable once BOQ generation has been initiated (see Refund Policy below).</li>

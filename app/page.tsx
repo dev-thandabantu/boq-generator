@@ -6,9 +6,9 @@ export default function LandingPage() {
       {/* Nav */}
       <nav className="fixed top-0 left-0 right-0 z-20 border-b border-white/5 bg-[#0a0a0a]/80 backdrop-blur">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <span className="text-sm font-semibold text-white">
-            BOQ <span className="text-amber-400">Generator</span>
-          </span>
+          <a href="/">
+            <img src="/boqlogo.png" alt="BOQ Generator" className="h-7 w-auto" width="120" height="28" />
+          </a>
           <div className="flex items-center gap-4">
             <a href="/dashboard" className="text-xs text-gray-400 hover:text-white transition-colors hidden sm:block">
               My BOQs
@@ -50,7 +50,7 @@ export default function LandingPage() {
                 href="/upload"
                 className="w-full sm:w-auto px-8 py-4 rounded-xl bg-amber-400 hover:bg-amber-300 text-black font-bold text-base transition-colors"
               >
-                Generate your BOQ — $100 →
+                Generate your BOQ →
               </a>
               <a
                 href="/dashboard"
@@ -78,7 +78,7 @@ export default function LandingPage() {
               {
                 step: "02",
                 title: "Pay once",
-                desc: "One flat fee of $100 USD. Secure checkout via Stripe. No subscription, no hidden costs.",
+                desc: "Fee is based on your project size — from $20 to $500. Secure checkout via Stripe. No subscription, no hidden costs.",
               },
               {
                 step: "03",
@@ -129,8 +129,8 @@ export default function LandingPage() {
           <h2 className="text-2xl font-bold text-white mb-4">Simple pricing</h2>
           <p className="text-gray-400 text-sm mb-10">No subscriptions. Pay only when you need a BOQ.</p>
           <div className="inline-block rounded-2xl border border-amber-500/30 bg-[#0f0f0f] p-8 text-left min-w-[280px]">
-            <p className="text-5xl font-bold text-amber-400 mb-1">$100</p>
-            <p className="text-gray-400 text-sm mb-6">USD · one-time per BOQ</p>
+            <p className="text-5xl font-bold text-amber-400 mb-1">$20 – $500</p>
+            <p className="text-gray-400 text-sm mb-6">USD · one-time per BOQ · based on project size</p>
             <ul className="space-y-2 mb-8">
               {[
                 "Full structured BOQ",
