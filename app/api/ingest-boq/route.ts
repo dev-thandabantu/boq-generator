@@ -74,6 +74,14 @@ export async function POST(req: NextRequest) {
       );
     }
     const missingRateCount = measurableItems.filter((item) => item.rate === null).length;
+
+    if (missingRateCount === 0) {
+      return NextResponse.json(
+        { error: "All rates are already filled in this BOQ. There's nothing for us to add. Try the Generate tab if you'd like a fresh BOQ from a scope of work." },
+        { status: 400 }
+      );
+    }
+
     const workbookPreservation = workbookBoq.workbook_preservation;
 
     // Upload original Excel to Supabase Storage using service role client (no RLS on bucket)

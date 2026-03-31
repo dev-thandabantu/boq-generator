@@ -785,7 +785,7 @@ function RateBOQTab() {
   const [storageKey, setStorageKey] = useState<string | null>(null);
   const [preview, setPreview] = useState<BOQPreview | null>(null);
   const [rateBoqId, setRateBoqId] = useState<string | null>(null);
-  const [rateAmountCents, setRateAmountCents] = useState<number>(2000);
+  const [rateAmountCents, setRateAmountCents] = useState<number>(3000);
   const [ctx, setCtx] = useState<RateContext>(DEFAULT_CONTEXT);
   const [customMargin, setCustomMargin] = useState(false);
   const ph = usePostHog();
@@ -817,10 +817,11 @@ function RateBOQTab() {
         throw new Error(e || "Validation failed");
       }
       const { storageKey: key, preview: p, boq_id: bid, amountCents: ac } = await res.json();
+
       setStorageKey(key);
       setPreview(p);
       setRateBoqId(bid ?? null);
-      setRateAmountCents(ac ?? 2000);
+      setRateAmountCents(ac ?? 3000);
       ph.capture("excel_boq_uploaded", {
         total_items: p.totalItems,
         missing_rate_count: p.missingRateCount,
