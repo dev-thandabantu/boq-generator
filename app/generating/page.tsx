@@ -14,6 +14,7 @@ function GeneratingContent() {
   const [progress, setProgress] = useState(10);
   const [statusText, setStatusText] = useState("Verifying payment and preparing your BOQ...");
   const [isRateBoq, setIsRateBoq] = useState(false);
+  const [isCheckingSavedBoq, setIsCheckingSavedBoq] = useState(false);
   const started = useRef(false);
 
   async function recoverCompletedBoq(currentSessionId: string): Promise<string | null> {
@@ -27,16 +28,32 @@ function GeneratingContent() {
     }
   }
 
-  async function waitForCompletedBoq(currentSessionId: string): Promise<string | null> {
-    const attempts = 6;
+  async function waitForCompletedBoq(
+    currentSessionId: string,
+    options?: { attempts?: number; delayMs?: number }
+  ): Promise<string | null> {
+    const attempts = options?.attempts ?? 30;
+    const delayMs = options?.delayMs ?? 2000;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const boqId = await recoverCompletedBoq(currentSessionId);
       if (boqId) return boqId;
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
     return null;
   }
 
+  async function checkAgainForSavedBoq() {
+    if (!sessionId) return;
+    setIsCheckingSavedBoq(true);
+    setStatusText("Checking again for a completed BOQ...");
+    const recoveredBoqId = await waitForCompletedBoq(sessionId, { attempts: 10, delayMs: 2000 });
+    if (recoveredBoqId) {
+      router.push(`/boq/${recoveredBoqId}`);
+      return;
+    }
+    setStatusText("Generation stopped due to an error.");
+    setIsCheckingSavedBoq(false);
+  }
   useEffect(() => {
     if (started.current) return;
     started.current = true;
@@ -44,6 +61,12 @@ function GeneratingContent() {
     async function unlock() {
       if (!sessionId) {
         setError("Missing payment session. Please start over.");
+        return;
+      }
+
+      const alreadySavedBoqId = await recoverCompletedBoq(sessionId);
+      if (alreadySavedBoqId) {
+        router.push(`/boq/${alreadySavedBoqId}`);
         return;
       }
 
@@ -100,7 +123,9 @@ function GeneratingContent() {
           try {
             const body = await res.json();
             e = body.error;
-          } catch { /* non-JSON error body */ }
+          } catch {
+            // Non-JSON error body
+          }
           if (res.status === 402)
             throw new Error("Payment could not be verified. Please contact support.");
           if (res.status === 429)
@@ -108,7 +133,7 @@ function GeneratingContent() {
           if (res.status === 503)
             throw new Error("AI service is temporarily busy. Please wait a moment and try again.");
           if (res.status === 504 || !e)
-            throw new Error("The request timed out. Please try again.");
+            throw new Error("The request timed out. Your BOQ may be large — please try again.");
           throw new Error(e || (isRateBoqValue ? "Rate filling failed" : "Could not unlock BOQ"));
         }
 
@@ -119,11 +144,11 @@ function GeneratingContent() {
           boq_id,
           bill_count: boq?.bills?.length ?? 0,
           item_count: (boq?.bills ?? []).reduce(
-            (s: number, b: { items?: unknown[] }) => s + (b.items?.length ?? 0), 0
+            (s: number, b: { items?: unknown[] }) => s + (b.items?.length ?? 0),
+            0
           ),
         });
 
-        // Clean up localStorage
         localStorage.removeItem("boq_type");
         localStorage.removeItem("boq_text");
         localStorage.removeItem("boq_document_bundle");
@@ -148,6 +173,7 @@ function GeneratingContent() {
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Something went wrong";
+        setIsCheckingSavedBoq(true);
         setStatusText("Checking whether your BOQ finished in the background...");
         const recoveredBoqId = sessionId ? await waitForCompletedBoq(sessionId) : null;
         if (recoveredBoqId) {
@@ -155,9 +181,10 @@ function GeneratingContent() {
           return;
         }
         setStatusText("Generation stopped due to an error.");
+        setIsCheckingSavedBoq(false);
         setError(
           msg === "Failed to fetch"
-            ? "The connection dropped while the BOQ was generating. We checked for a completed result but did not find one yet. Please try again."
+            ? "The connection dropped while the BOQ was generating. We kept checking for a completed result but did not find one yet."
             : msg
         );
       } finally {
@@ -196,12 +223,24 @@ function GeneratingContent() {
               <h2 className="text-xl font-semibold text-white mb-2">Something went wrong</h2>
               <p className="text-gray-400 text-sm leading-relaxed">{error}</p>
             </div>
-            <a
-              href="/"
-              className="inline-block px-6 py-2.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-black font-semibold text-sm transition-colors"
-            >
-              Start Over
-            </a>
+            <div className="flex items-center justify-center gap-3">
+              {sessionId ? (
+                <button
+                  type="button"
+                  onClick={checkAgainForSavedBoq}
+                  disabled={isCheckingSavedBoq}
+                  className="inline-block px-6 py-2.5 rounded-lg bg-white/10 hover:bg-white/15 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold text-sm transition-colors"
+                >
+                  {isCheckingSavedBoq ? "Checking..." : "Check Again"}
+                </button>
+              ) : null}
+              <a
+                href="/"
+                className="inline-block px-6 py-2.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-black font-semibold text-sm transition-colors"
+              >
+                Start Over
+              </a>
+            </div>
           </div>
         ) : (
           <div className="space-y-8">
