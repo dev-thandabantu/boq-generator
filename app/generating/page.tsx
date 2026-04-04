@@ -81,12 +81,22 @@ function GeneratingContent() {
         progressTimer = setInterval(() => {
           setProgress((p) => (p < 94 ? p + 3 : p));
           const elapsed = Math.floor((Date.now() - startedAt) / 1000);
-          if (elapsed > 20) {
-            setStatusText("Still working. Complex BOQs can take a bit longer...");
+          if (elapsed > 90) {
+            setStatusText(
+              isRateBoqValue
+                ? "Still filling rates. Large BOQs can take several minutes."
+                : "Still building your BOQ. Large document bundles can take several minutes."
+            );
+          } else if (elapsed > 30) {
+            setStatusText(
+              isRateBoqValue
+                ? "Saving your rated BOQ and preparing your export..."
+                : "Saving your BOQ and preparing it for review..."
+            );
           } else if (elapsed > 8) {
             setStatusText(
               isRateBoqValue
-                ? "Matching Zambian market rates to your items..."
+                ? "Reading workbook structure and filling missing rates..."
                 : "Finalising your BOQ..."
             );
           }
@@ -132,8 +142,10 @@ function GeneratingContent() {
             throw new Error("AI quota exceeded. Please try again in a minute.");
           if (res.status === 503)
             throw new Error("AI service is temporarily busy. Please wait a moment and try again.");
-          if (res.status === 504 || !e)
-            throw new Error("The request timed out. Your BOQ may be large — please try again.");
+      if (res.status === 504 || !e)
+        throw new Error(
+          "This is taking longer than expected. We are checking whether your BOQ finished in the background."
+        );
           throw new Error(e || (isRateBoqValue ? "Rate filling failed" : "Could not unlock BOQ"));
         }
 
@@ -300,7 +312,9 @@ function GeneratingContent() {
             })()}
             <div className="space-y-2">
               <Progress value={progress} className="h-2 bg-white/10" />
-              <p className="text-xs text-gray-500">Almost there…</p>
+            <p className="text-xs text-gray-500">
+              Small BOQs finish quickly. Larger files can take several minutes.
+            </p>
             </div>
           </div>
         )}
