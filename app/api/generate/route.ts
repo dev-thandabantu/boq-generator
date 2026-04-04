@@ -9,7 +9,7 @@ import { computePricing, loadTiers } from "@/lib/pricing";
 import type { PostgrestError } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 function isPostgrestError(error: unknown): error is PostgrestError {
   return Boolean(

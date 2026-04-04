@@ -11,7 +11,7 @@ const pdfParse = require("pdf-parse") as (
 ) => Promise<{ text: string; numpages: number }>;
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 const MAX_SIZE = 15 * 1024 * 1024; // 15 MB
 const MIN_DIRECT_TEXT_LENGTH = 120;

@@ -8,7 +8,7 @@ import { trackEvent } from "@/lib/analytics";
 import { getTierForItemCount, loadRateTiers } from "@/lib/pricing";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB (storage bucket limit)
 const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET ?? "boq-generator-dev";
